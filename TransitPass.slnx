@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/" />
+  <Folder Name="/src/Host/">
+    <Project Path="src/Host/TransitPass.Api/TransitPass.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/TransitPass.Api.Tests/TransitPass.Api.Tests.csproj" />
+  </Folder>
+</Solution>
