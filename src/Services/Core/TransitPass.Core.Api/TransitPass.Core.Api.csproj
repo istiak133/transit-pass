@@ -3,6 +3,6 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
   </ItemGroup>
   <ItemGroup>
-    <InternalsVisibleTo Include="TransitPass.Api.Tests" />
+    <ProjectReference Include="../../../BuildingBlocks/TransitPass.BuildingBlocks/TransitPass.BuildingBlocks.csproj" />
   </ItemGroup>
 </Project>

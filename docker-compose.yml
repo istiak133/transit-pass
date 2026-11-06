@@ -1,0 +1,86 @@
+# Local stack: one PostgreSQL server holding three separate databases, three services, and the gateway.
+# Only the gateway (and PostgreSQL, for your SQL client) are published to the host.
+#   ./deploy/dev-secrets.sh      (once: random passwords into .env)
+#   docker compose up --build
+#   curl http://localhost:5100/health/live
+
+x-service: &service
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment: &service-env
+    ASPNETCORE_ENVIRONMENT: Production
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?run ./deploy/dev-secrets.sh first}
+      IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD:?run ./deploy/dev-secrets.sh first}
+      NETWORK_DB_PASSWORD: ${NETWORK_DB_PASSWORD:?run ./deploy/dev-secrets.sh first}
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD:?run ./deploy/dev-secrets.sh first}
+    ports:
+      # Host port is configurable in case 5432 is taken: POSTGRES_HOST_PORT=55432 docker compose up
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  identity:
+    <<: *service
+    build:
+      context: .
+      args:
+        PROJECT: src/Services/Identity/TransitPass.Identity.Api/TransitPass.Identity.Api.csproj
+        APP_DLL: TransitPass.Identity.Api.dll
+    environment:
+      <<: *service-env
+      ConnectionStrings__Default: Host=postgres;Database=identity_db;Username=identity_svc;Password=${IDENTITY_DB_PASSWORD}
+
+  network:
+    <<: *service
+    build:
+      context: .
+      args:
+        PROJECT: src/Services/Network/TransitPass.Network.Api/TransitPass.Network.Api.csproj
+        APP_DLL: TransitPass.Network.Api.dll
+    environment:
+      <<: *service-env
+      ConnectionStrings__Default: Host=postgres;Database=network_db;Username=network_svc;Password=${NETWORK_DB_PASSWORD}
+
+  core:
+    <<: *service
+    build:
+      context: .
+      args:
+        PROJECT: src/Services/Core/TransitPass.Core.Api/TransitPass.Core.Api.csproj
+        APP_DLL: TransitPass.Core.Api.dll
+    environment:
+      <<: *service-env
+      ConnectionStrings__Default: Host=postgres;Database=core_db;Username=core_svc;Password=${CORE_DB_PASSWORD}
+
+  gateway:
+    restart: unless-stopped
+    build:
+      context: .
+      args:
+        PROJECT: src/Gateway/TransitPass.Gateway/TransitPass.Gateway.csproj
+        APP_DLL: TransitPass.Gateway.dll
+    depends_on: [identity, network, core]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      # Inside the Compose network each service is reachable by its name on port 8080.
+      ReverseProxy__Clusters__identity__Destinations__primary__Address: http://identity:8080/
+      ReverseProxy__Clusters__network__Destinations__primary__Address: http://network:8080/
+      ReverseProxy__Clusters__core__Destinations__primary__Address: http://core:8080/
+    ports:
+      - "5100:8080"
+
+volumes:
+  pgdata:

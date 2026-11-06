@@ -1,6 +1,6 @@
 # 0001. Modular monolith over microservices
 
-- **Status:** Accepted
+- **Status:** Superseded by [0019](0019-microservices-with-transit-core.md)
 - **Date:** 2026-11-04
 
 ## Context

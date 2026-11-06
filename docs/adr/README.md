@@ -5,7 +5,7 @@ A decision is never edited after acceptance; it is superseded by a new ADR that 
 
 | # | Title | Status |
 |---|---|---|
-| [0001](0001-modular-monolith.md) | Modular monolith over microservices | Accepted |
+| [0001](0001-modular-monolith.md) | Modular monolith over microservices | Superseded by 0019 |
 | [0002](0002-postgresql.md) | PostgreSQL as the system of record | Accepted |
 | [0003](0003-testing-strategy.md) | Testing stack and strategy | Accepted |
 | [0004](0004-build-and-ci-conventions.md) | Build and CI conventions | Accepted |
@@ -23,5 +23,6 @@ A decision is never edited after acceptance; it is superseded by a new ADR that 
 | [0016](0016-redis-role.md) | Role of Redis | Accepted |
 | [0017](0017-observability.md) | Observability | Accepted |
 | [0018](0018-frontend.md) | Frontend: Next.js PWA with a thin BFF | Accepted |
+| [0019](0019-microservices-with-transit-core.md) | Microservices behind an API gateway, with one Transit Core service | Accepted |
 
 New ADR: copy [template.md](template.md), take the next number, open it in the same PR as the change it justifies.

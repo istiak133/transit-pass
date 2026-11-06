@@ -55,3 +55,17 @@ jobs:
           name: test-results
           path: TestResults
           retention-days: 14
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # Builds every image the way production would, so a broken Dockerfile or a project that only
+      # compiles with local state fails here instead of at deploy time.
+      - name: Build images
+        run: |
+          ./deploy/dev-secrets.sh
+          docker compose build

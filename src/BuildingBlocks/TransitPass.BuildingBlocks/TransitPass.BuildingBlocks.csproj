@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Shared code every service uses: Result/Error, problem details, pagination, hosting defaults.
+       It holds no business logic, so services stay independent of each other. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TransitPass.BuildingBlocks.Tests" />
+  </ItemGroup>
+</Project>
