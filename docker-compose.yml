@@ -1,5 +1,6 @@
 # Local stack: one PostgreSQL server holding three separate databases, three services, and the gateway.
 # Only the gateway (and PostgreSQL, for your SQL client) are published to the host.
+#   ./deploy/dev-secrets.sh      (once: random passwords into .env)
 #   docker compose up --build
 #   curl http://localhost:5100/health/live
 
@@ -15,13 +16,16 @@ services:
   postgres:
     image: postgres:17-alpine
     environment:
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?run ./deploy/dev-secrets.sh first}
+      IDENTITY_DB_PASSWORD: ${IDENTITY_DB_PASSWORD:?run ./deploy/dev-secrets.sh first}
+      NETWORK_DB_PASSWORD: ${NETWORK_DB_PASSWORD:?run ./deploy/dev-secrets.sh first}
+      CORE_DB_PASSWORD: ${CORE_DB_PASSWORD:?run ./deploy/dev-secrets.sh first}
     ports:
       # Host port is configurable in case 5432 is taken: POSTGRES_HOST_PORT=55432 docker compose up
       - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./deploy/postgres/init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 3s
@@ -37,7 +41,7 @@ services:
         APP_DLL: TransitPass.Identity.Api.dll
     environment:
       <<: *service-env
-      ConnectionStrings__Default: Host=postgres;Database=identity_db;Username=identity_svc;Password=dev_identity_pw
+      ConnectionStrings__Default: Host=postgres;Database=identity_db;Username=identity_svc;Password=${IDENTITY_DB_PASSWORD}
 
   network:
     <<: *service
@@ -48,7 +52,7 @@ services:
         APP_DLL: TransitPass.Network.Api.dll
     environment:
       <<: *service-env
-      ConnectionStrings__Default: Host=postgres;Database=network_db;Username=network_svc;Password=dev_network_pw
+      ConnectionStrings__Default: Host=postgres;Database=network_db;Username=network_svc;Password=${NETWORK_DB_PASSWORD}
 
   core:
     <<: *service
@@ -59,7 +63,7 @@ services:
         APP_DLL: TransitPass.Core.Api.dll
     environment:
       <<: *service-env
-      ConnectionStrings__Default: Host=postgres;Database=core_db;Username=core_svc;Password=dev_core_pw
+      ConnectionStrings__Default: Host=postgres;Database=core_db;Username=core_svc;Password=${CORE_DB_PASSWORD}
 
   gateway:
     restart: unless-stopped

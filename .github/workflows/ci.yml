@@ -66,4 +66,6 @@ jobs:
       # Builds every image the way production would, so a broken Dockerfile or a project that only
       # compiles with local state fails here instead of at deploy time.
       - name: Build images
-        run: docker compose build
+        run: |
+          ./deploy/dev-secrets.sh
+          docker compose build
