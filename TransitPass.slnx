@@ -1,9 +1,18 @@
 <Solution>
   <Folder Name="/src/" />
-  <Folder Name="/src/Host/">
-    <Project Path="src/Host/TransitPass.Api/TransitPass.Api.csproj" />
+  <Folder Name="/src/BuildingBlocks/">
+    <Project Path="src/BuildingBlocks/TransitPass.BuildingBlocks/TransitPass.BuildingBlocks.csproj" />
+  </Folder>
+  <Folder Name="/src/Gateway/">
+    <Project Path="src/Gateway/TransitPass.Gateway/TransitPass.Gateway.csproj" />
+  </Folder>
+  <Folder Name="/src/Services/">
+    <Project Path="src/Services/Identity/TransitPass.Identity.Api/TransitPass.Identity.Api.csproj" />
+    <Project Path="src/Services/Network/TransitPass.Network.Api/TransitPass.Network.Api.csproj" />
+    <Project Path="src/Services/Core/TransitPass.Core.Api/TransitPass.Core.Api.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/TransitPass.Api.Tests/TransitPass.Api.Tests.csproj" />
+    <Project Path="tests/TransitPass.BuildingBlocks.Tests/TransitPass.BuildingBlocks.Tests.csproj" />
+    <Project Path="tests/TransitPass.Gateway.Tests/TransitPass.Gateway.Tests.csproj" />
   </Folder>
 </Solution>

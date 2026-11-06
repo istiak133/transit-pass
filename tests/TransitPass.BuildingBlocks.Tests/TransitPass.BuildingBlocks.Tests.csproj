@@ -8,12 +8,13 @@
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="Shouldly" />
     <PackageReference Include="Microsoft.Testing.Extensions.CodeCoverage" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" />
+
   </ItemGroup>
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="Shouldly" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/Host/TransitPass.Api/TransitPass.Api.csproj" />
+    <ProjectReference Include="../../src/BuildingBlocks/TransitPass.BuildingBlocks/TransitPass.BuildingBlocks.csproj" />
   </ItemGroup>
 </Project>
