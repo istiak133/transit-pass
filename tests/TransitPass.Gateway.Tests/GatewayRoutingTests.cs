@@ -50,20 +50,21 @@ public sealed class GatewayRoutingTests
     }
 
     [Fact]
-    public async Task Safe_client_request_id_is_kept_and_unsafe_one_replaced()
+    public async Task Uuid_request_id_is_kept_and_anything_else_replaced()
     {
         using var factory = new GatewayFactory();
         using var client = factory.CreateClient();
+        string clientId = Guid.CreateVersion7().ToString("N");
 
         using var safe = new HttpRequestMessage(HttpMethod.Get, "/api/v1/identity/ping");
-        safe.Headers.Add("X-Request-Id", "client-abc_123");
+        safe.Headers.Add("X-Request-Id", clientId);
         var kept = await client.SendAsync(safe, TestContext.Current.CancellationToken);
 
         using var unsafeRequest = new HttpRequestMessage(HttpMethod.Get, "/api/v1/identity/ping");
         unsafeRequest.Headers.TryAddWithoutValidation("X-Request-Id", "evil value; injected");
         var replaced = await client.SendAsync(unsafeRequest, TestContext.Current.CancellationToken);
 
-        kept.Headers.GetValues("X-Request-Id").Single().ShouldBe("client-abc_123");
+        kept.Headers.GetValues("X-Request-Id").Single().ShouldBe(clientId);
         replaced.Headers.GetValues("X-Request-Id").Single().ShouldNotContain("evil");
     }
 

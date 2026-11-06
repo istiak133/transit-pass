@@ -52,10 +52,14 @@ public sealed class GatewayFactory : WebApplicationFactory<Program>
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             log.Enqueue(request);
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            return Task.FromResult(EchoTarget(request));
+        }
+
+        // The caller (YARP's HttpMessageInvoker) owns and disposes the response.
+        private static HttpResponseMessage EchoTarget(HttpRequestMessage request) =>
+            new(HttpStatusCode.OK)
             {
                 Content = new StringContent($"{request.RequestUri!.Host}{request.RequestUri.PathAndQuery}"),
-            });
-        }
+            };
     }
 }
