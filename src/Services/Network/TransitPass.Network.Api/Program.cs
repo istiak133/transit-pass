@@ -1,4 +1,5 @@
 using TransitPass.BuildingBlocks.Hosting;
+using TransitPass.Network.Api.Stations;
 
 // Network service. It owns its own database (network_db) and nothing else reads it.
 // Endpoints live under /api/v1/network, which is also the gateway route for this service.
@@ -16,6 +17,8 @@ if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
+
+app.MapStationEndpoints();
 
 await app.RunAsync();
 
