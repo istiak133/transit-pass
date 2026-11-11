@@ -1,4 +1,5 @@
 using TransitPass.BuildingBlocks.Hosting;
+using TransitPass.Network.Api.Data;
 using TransitPass.Network.Api.Stations;
 
 // Network service. It owns its own database (network_db) and nothing else reads it.
@@ -7,6 +8,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
 builder.AddPostgres();
+builder.AddNetworkDatabase();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
@@ -19,6 +21,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapStationEndpoints();
+
+await app.MigrateIfEnabledAsync();
 
 await app.RunAsync();
 

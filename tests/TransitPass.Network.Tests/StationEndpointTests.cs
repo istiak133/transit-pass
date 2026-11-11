@@ -1,32 +1,22 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace TransitPass.Network.Tests;
-
-public sealed class NetworkFactory : WebApplicationFactory<Program>
-{
-    protected override void ConfigureWebHost(IWebHostBuilder builder)
-    {
-        // A connection string must exist for startup; these tests never open a connection.
-        builder.UseSetting("ConnectionStrings:Default", "Host=localhost");
-    }
-}
 
 public sealed class StationEndpointTests(NetworkFactory factory) : IClassFixture<NetworkFactory>
 {
     private readonly HttpClient _client = factory.CreateClient();
 
     [Fact]
-    public async Task List_returns_all_stations()
+    public async Task List_returns_seeded_stations_sorted_by_id()
     {
         var stations = await _client.GetFromJsonAsync<JsonElement[]>(
             "/api/v1/network/stations", TestContext.Current.CancellationToken);
 
-        stations!.Length.ShouldBe(4);
-        stations[0].GetProperty("id").GetString().ShouldBe("uttara-north");
+        // Seeded by the migration, returned in a stable order (ORDER BY id).
+        stations!.Select(s => s.GetProperty("id").GetString())
+            .ShouldBe(["agargaon", "karwan-bazar", "motijheel", "uttara-north"]);
     }
 
     [Fact]
