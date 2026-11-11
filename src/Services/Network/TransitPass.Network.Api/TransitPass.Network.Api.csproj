@@ -7,4 +7,7 @@
   <ItemGroup>
     <ProjectReference Include="../../../BuildingBlocks/TransitPass.BuildingBlocks/TransitPass.BuildingBlocks.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="TransitPass.Network.Tests" />
+  </ItemGroup>
 </Project>

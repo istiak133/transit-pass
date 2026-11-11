@@ -16,10 +16,60 @@ namespace TransitPass.Network.Api.Data.Migrations
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.15")
+                .HasAnnotation("ProductVersion", "10.0.4")
                 .HasAnnotation("Relational:MaxIdentifierLength", 63);
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
+
+            modelBuilder.Entity("TransitPass.Network.Api.Segments.Segment", b =>
+                {
+                    b.Property<string>("StationA")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("station_a");
+
+                    b.Property<string>("StationB")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("station_b");
+
+                    b.Property<int>("DistanceM")
+                        .HasColumnType("integer")
+                        .HasColumnName("distance_m");
+
+                    b.HasKey("StationA", "StationB")
+                        .HasName("pk_segments");
+
+                    b.HasIndex("StationB")
+                        .HasDatabaseName("ix_segments_station_b");
+
+                    b.ToTable("segments", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_segments_canonical_order", "station_a COLLATE \"C\" < station_b COLLATE \"C\"");
+
+                            t.HasCheckConstraint("ck_segments_distance_positive", "distance_m > 0");
+                        });
+
+                    b.HasData(
+                        new
+                        {
+                            StationA = "agargaon",
+                            StationB = "uttara-north",
+                            DistanceM = 9000
+                        },
+                        new
+                        {
+                            StationA = "agargaon",
+                            StationB = "karwan-bazar",
+                            DistanceM = 4000
+                        },
+                        new
+                        {
+                            StationA = "karwan-bazar",
+                            StationB = "motijheel",
+                            DistanceM = 3500
+                        });
+                });
 
             modelBuilder.Entity("TransitPass.Network.Api.Stations.Station", b =>
                 {
@@ -67,6 +117,23 @@ namespace TransitPass.Network.Api.Data.Migrations
                             Id = "motijheel",
                             Name = "Motijheel"
                         });
+                });
+
+            modelBuilder.Entity("TransitPass.Network.Api.Segments.Segment", b =>
+                {
+                    b.HasOne("TransitPass.Network.Api.Stations.Station", null)
+                        .WithMany()
+                        .HasForeignKey("StationA")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_segments_station_a");
+
+                    b.HasOne("TransitPass.Network.Api.Stations.Station", null)
+                        .WithMany()
+                        .HasForeignKey("StationB")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_segments_station_b");
                 });
 #pragma warning restore 612, 618
         }

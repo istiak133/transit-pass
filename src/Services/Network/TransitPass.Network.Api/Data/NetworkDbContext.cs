@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using TransitPass.Network.Api.Segments;
 using TransitPass.Network.Api.Stations;
 
 namespace TransitPass.Network.Api.Data;
@@ -8,6 +9,9 @@ public sealed class NetworkDbContext(DbContextOptions<NetworkDbContext> options)
 {
     /// <summary>The stations table. A LINQ query on this becomes SQL.</summary>
     public DbSet<Station> Stations => Set<Station>();
+
+    /// <summary>The track between neighbouring stations.</summary>
+    public DbSet<Segment> Segments => Set<Segment>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
