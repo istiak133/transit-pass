@@ -33,12 +33,10 @@ public static class FareEndpoints
             return Error.Validation("fare.same_station", "'from' and 'to' must be different stations.");
         }
 
-        foreach (var id in (string[])[from, to])
+        string? unknown = !graph.Contains(from) ? from : !graph.Contains(to) ? to : null;
+        if (unknown is not null)
         {
-            if (!graph.Contains(id))
-            {
-                return Error.NotFound("station.not_found", $"Station '{id}' does not exist.");
-            }
+            return Error.NotFound("station.not_found", $"Station '{unknown}' does not exist.");
         }
 
         if (!graph.TryGetDistance(from, to, out long metres))
