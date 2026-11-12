@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-145%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-160%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -18,8 +18,8 @@ A metro ticketing backend built around one passenger, **Rafi**: he signs up, top
 
 - 🏗️ **Architecture:** four .NET 10 services behind a YARP API gateway, each with its own PostgreSQL database
 - ✅ **Built so far:** the platform (gateway, rate limiting, errors, health, CI), stations, the track graph with fare quotes (Dijkstra), sign-up, login with ES256-signed JWTs, and the first protected endpoint, which Core verifies locally with Identity's public keys
-- 🛣️ **In progress:** wallet and ledger, then top-ups, tickets, signed QR, gates (see [Roadmap](#-roadmap))
-- 🧪 **Quality:** 145 tests, database tests against a real PostgreSQL 17 (Testcontainers), and CI with CodeQL on every pull request
+- 🛣️ **In progress:** top-ups, then tickets, signed QR, gates (see [Roadmap](#-roadmap))
+- 🧪 **Quality:** 160 tests, database tests against a real PostgreSQL 17 (Testcontainers), and CI with CodeQL on every pull request
 - 📚 **Decisions:** 19 [Architecture Decision Records](docs/adr/README.md) and a [PRD](docs/PRD.md)
 
 ---
@@ -76,6 +76,10 @@ TransitPass started from studying an open-source student metro ticketing project
 - **Only ES256** is accepted, so `alg: none` and HS256 tokens are refused. Issuer, audience and expiry are checked, with 30 s of clock skew
 - **Resilient and abuse-proof:** if Identity is down, cached keys keep working; a flood of tokens with fake `kid`s can't turn into a flood of requests to Identity (at most one forced refresh every 30 s)
 - The same verification lives in BuildingBlocks (`AddJwtAuthentication`), so any service can protect its endpoints with one call
+- **Wallet on first visit:** `GET /api/v1/wallet/me` finds or creates the caller's wallet (`INSERT … ON CONFLICT DO NOTHING` on `UNIQUE(user_id)`, so 20 simultaneous first visits still make one wallet) and returns the balance in **integer poisha**
+- **Append-only ledger:** every taka that moves is a `ledger_entries` row (`TopUp`, `Purchase`, `Refund`, `Surcharge`), never edited or deleted. The balance is a cache of `SUM(amount)`, and both change in **one transaction**
+- **No overspending, even under races:** a posting is one conditional `UPDATE … SET balance = balance + amount WHERE balance + amount >= 0`, and `CHECK (balance_poisha >= 0)` backs it up in the database (20 racing ৳100 debits on ৳1000 → exactly 10 succeed)
+- **History with keyset pagination:** `GET /api/v1/wallet/me/transactions?after=&limit=` returns newest first, served by an index scan on `(wallet_id, id)` in O(log n + page) at any depth
 
 **🛠️ Engineering**
 - Database-per-service: each service logs in as its own PostgreSQL role, and the others cannot even connect
@@ -89,7 +93,7 @@ flowchart LR
     C["Client<br/>(app, gate, curl)"] -->|HTTPS| G["Gateway · YARP :5100<br/>routing · rate limit · request id"]
     G -->|/api/v1/identity| I["Identity service :5101<br/>users · passwords · ES256 JWT · JWKS"]
     G -->|/api/v1/network| N["Network service :5102<br/>stations · track graph · fares"]
-    G -->|/api/v1/wallet · tickets · gate| T["Transit Core :5103<br/>verifies JWT · (next: wallet · tickets · gate)"]
+    G -->|/api/v1/wallet · tickets · gate| T["Transit Core :5103<br/>verifies JWT · wallet · ledger<br/>(next: top-ups · tickets · gate)"]
     T -. "public keys (JWKS), cached" .-> I
     I --> IDB[("identity_db<br/>role identity_svc")]
     N --> NDB[("network_db<br/>role network_svc")]
@@ -135,7 +139,26 @@ erDiagram
     }
 ```
 
-`users` lives in `identity_db`. `stations` and `segments` live in `network_db`.
+```mermaid
+erDiagram
+    WALLETS ||--o{ LEDGER_ENTRIES : "has history"
+    WALLETS {
+        uuid id PK "UUIDv7"
+        uuid user_id UK "from the token sub, no FK"
+        bigint balance_poisha "CHECK >= 0"
+        timestamptz created_at
+    }
+    LEDGER_ENTRIES {
+        uuid id PK "UUIDv7, also the cursor"
+        uuid wallet_id FK "ON DELETE RESTRICT"
+        bigint amount_poisha "CHECK <> 0"
+        varchar type "TopUp, Purchase, Refund, Surcharge"
+        uuid ref_id "top-up or ticket id"
+        timestamptz created_at
+    }
+```
+
+`users` lives in `identity_db`. `stations` and `segments` live in `network_db`. `wallets` and `ledger_entries` live in `core_db`; `wallets.user_id` holds an Identity user id with no FK, because that table is in another database.
 
 ### 📋 Tables
 
@@ -144,13 +167,17 @@ erDiagram
 | `users` | identity_db | One row per passenger: phone, name, password hash | `pk_users (id)` · `ux_users_phone` unique · `ck_users_phone_e164` CHECK `^\+[1-9][0-9]{7,14}$` |
 | `stations` | network_db | The stations, with readable ids like `agargaon` | `pk_stations (id)` · `ux_stations_name` unique · `ck_stations_id_slug` CHECK |
 | `segments` | network_db | One row per stretch of track and its length | `pk_segments (station_a, station_b)` · 2 FKs → `stations` with `ON DELETE RESTRICT` · `ck_segments_canonical_order` CHECK `station_a < station_b` (byte collation) · `ck_segments_distance_positive` · `ix_segments_station_b` |
+| `wallets` | core_db | One wallet per user and its current balance (a cache of the ledger sum) | `pk_wallets (id)` · `ux_wallets_user_id` unique · `ck_wallets_balance_non_negative` CHECK `balance_poisha >= 0` |
+| `ledger_entries` | core_db | Every movement of money, append-only | `pk_ledger_entries (id)` · `fk_ledger_entries_wallet` → `wallets` `ON DELETE RESTRICT` · `ck_ledger_entries_amount_non_zero` · `ck_ledger_entries_type` · `ix_ledger_entries_wallet_id_id (wallet_id, id)` |
 
 - 💰 Money is **integer poisha** (৳1 = 100), never a float.
 - 🕒 Times are `timestamptz` (stored in UTC). User ids are **UUIDv7**: unique without coordination, and time-ordered, so new rows land at the right edge of the B+ tree index.
 - ↔️ Track runs both ways, so each stretch is stored **once**. The canonical-order CHECK blocks both reversed duplicates and self-loops. It compares bytes (`COLLATE "C"`), because a language-aware collation can ignore hyphens and disagree with C#'s ordinal order.
 - 📇 PostgreSQL does not index foreign key columns, so `ix_segments_station_b` exists. `station_a` is already covered as the first column of the primary key.
 
-**Next tables** (designed, built phase by phase): `wallets`, `ledger_entries`, `topups`, `tickets`, `journeys`, `gate_taps`, `gate_devices`, idempotency records.
+- 📇 `ix_ledger_entries_wallet_id_id` does two jobs: it serves the history page (`WHERE wallet_id = … AND id < cursor ORDER BY id DESC`, an *Index Scan Backward*) and it indexes the foreign key.
+
+**Next tables** (designed, built phase by phase): `topups`, `tickets`, `journeys`, `gate_taps`, `gate_devices`, idempotency records.
 
 ## 🧰 Tech stack
 
@@ -202,7 +229,9 @@ erDiagram
 │       │   ├── Fares/                            RouteGraph (Dijkstra), IFarePolicy, FareCatalog, endpoint
 │       │   └── Data/                             DbContext, migrations
 │       └── Core/TransitPass.Core.Api/
-│           └── Wallet/                           GET /wallet/me (protected); balance and ledger next
+│           ├── Wallets/                          Wallet, mapping, /wallet/me + /wallet/me/transactions
+│           ├── Ledger/                           LedgerEntry, mapping, LedgerBook (the only code that moves money)
+│           └── Data/                             DbContext, migrations
 ├── tests/                                        one test project per service + building blocks + gateway
 ├── deploy/
 │   ├── postgres/init.sh                          one database + one login role per service
@@ -302,6 +331,11 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Core: no token → `401` problem + `WWW-Authenticate`; a valid token → `200` with the token's `sub` | `tests/TransitPass.Core.Tests/WalletAuthTests.cs` |
 | Core refuses expired, wrong-audience, wrong-issuer, unknown-key, tampered, `alg: none`, HS256, non-UUID `sub` and garbage tokens | `WalletAuthTests.cs` |
 | Keys are fetched once for many requests; a rotated key is picked up after one refresh; Identity down keeps the cached keys; 30 fake `kid`s cause at most one extra fetch | `WalletAuthTests.cs` |
+| The first wallet visit creates an empty wallet; 20 simultaneous first visits create exactly one | `tests/TransitPass.Core.Tests/WalletEndpointTests.cs` |
+| History pages newest first with no gaps or duplicates; a user sees only their own entries; a bad cursor is `400` | `WalletEndpointTests.cs` |
+| Credit and debit keep `SUM(ledger) == balance`; an overdraft is refused and leaves no row; a posting rolls back with its caller's transaction | `tests/TransitPass.Core.Tests/LedgerBookTests.cs` |
+| 20 racing ৳100 debits on ৳1000 → exactly 10 succeed, balance ends at 0 | `LedgerBookTests.cs` |
+| The database refuses a negative balance, a zero amount and an unknown entry type, even when the app is bypassed | `LedgerBookTests.cs` |
 | The gateway passes the `Authorization` header through unchanged | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
@@ -326,7 +360,8 @@ All paths go through the gateway at `http://localhost:5100`.
 | POST | `/api/v1/identity/users` | Sign up `{ phone, name, password }` → `201 Created` + `Location`, body `{ id, phone, name, createdAt }` |
 | POST | `/api/v1/identity/sessions` | Log in `{ phone, password }` → `200 { accessToken, tokenType: "Bearer", expiresIn: 900, expiresAt }` |
 | GET | `/.well-known/jwks.json` (Identity, internal) | The public signing key(s) as a JWK set, `Cache-Control: max-age=300` |
-| GET | `/api/v1/wallet/me` 🔒 | `Authorization: Bearer <token>` → `200 { userId }`; no or bad token → `401 auth.unauthenticated` |
+| GET | `/api/v1/wallet/me` 🔒 | `Authorization: Bearer <token>` → `200 { walletId, userId, balancePoisha, currency }` (created on first visit); no or bad token → `401 auth.unauthenticated` |
+| GET | `/api/v1/wallet/me/transactions?after=&limit=` 🔒 | `200 { items: [{ id, amountPoisha, type, refId, createdAt }], nextCursor }`, newest first; bad cursor → `400 pagination.invalid_cursor` |
 
 ```bash
 curl -s "localhost:5100/api/v1/network/fares/quote?from=uttara-north&to=motijheel"
@@ -438,7 +473,7 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 |---|---|
 | Microservices with wallet, tickets and gates kept together (ADR 0019) | Four processes to run, and no cross-service joins. In return, money and tickets change in one ACID transaction, without sagas |
 | Database per service, no foreign keys across services | Integrity across services comes from verified tokens and snapshots, not the database |
-| Integer poisha and a double-entry, append-only ledger (ADR 0005) | More rows than a single balance column. In return every taka has a history, and refunds are reversals, never edits |
+| Integer poisha and an append-only ledger with a balance cache (ADR 0005) | More rows than a single balance column. In return every taka has a history, and refunds are reversals, never edits |
 | Insert-and-catch on UNIQUE instead of check-then-insert | Relies on reading PostgreSQL error codes (`23505`). In return it is correct under any concurrency |
 | Phone normalized to E.164 and checked again by the database | Only Bangladeshi mobile numbers for now |
 | Track stored once per stretch, in canonical order | Code must sort the two ids before writing. In return the two directions can never disagree |
@@ -451,9 +486,10 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 ## 🚧 Known limitations
 
 - 🔐 **No refresh token yet,** so after 15 minutes the user logs in again. A token can't be revoked before it expires (no deny-list yet).
-- 💳 **`/wallet/me` returns only the user id;** the balance arrives with the wallet in Phase 7.
 - 🔒 **The per-phone login limit is in memory,** so it's per Identity instance and resets on restart (Redis is in the bonus list). Someone can also keep one phone's login blocked for a minute by failing on purpose: that trade buys protection from password guessing.
-- 💳 **No wallet, tickets or gates yet.** Transit Core verifies tokens, but has no money or ticket features yet.
+- 💳 **No way to add money yet.** The wallet and ledger exist, but top-ups arrive in Phase 8, so a new wallet stays at ৳0.
+- 📒 **Single-sided ledger.** Each movement is one row on the user's wallet. Full double-entry (a matching row on a system account, so every transaction sums to zero) is not modelled yet.
+- 🎫 **No tickets or gates yet.**
 - 📱 **Bangladeshi mobile numbers only,** and phones are not verified (no OTP yet).
 - 🗺️ **Seed network is four stations.** Station and track changes are made through migrations, and the fare graph picks them up on restart.
 - 🧮 **One fare policy.** No student, off-peak or capped-day fares yet (the `IFarePolicy` seam is there).
@@ -473,8 +509,8 @@ Each phase is one small pull request with its own tests.
 | 4 | Sign-up | ✅ #9 |
 | 5 | Login: ES256 JWT and a JWKS endpoint | ✅ #11 |
 | 6 | Protected endpoints across services (401 / 403) | ✅ #12 |
-| 7 | Wallet and double-entry ledger, history with cursor pagination | ⏳ next |
-| 8 | Top-up through an HMAC-signed payment webhook, an inbox for duplicates | |
+| 7 | Wallet and append-only ledger, history with cursor pagination | ✅ #13 |
+| 8 | Top-up through an HMAC-signed payment webhook, an inbox for duplicates | ⏳ next |
 | 9 | Ticket purchase: `Idempotency-Key`, atomic debit, a 200-way concurrency test | |
 | 10 | Ticket list and cancel with refund (ledger reversal) | |
 | 11 | Signed QR credential (JWS) | |
