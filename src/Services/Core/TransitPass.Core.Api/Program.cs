@@ -1,4 +1,6 @@
+using TransitPass.BuildingBlocks.Auth;
 using TransitPass.BuildingBlocks.Hosting;
+using TransitPass.Core.Api.Wallet;
 
 // Transit Core service: Wallet, Ticketing and Gate. They live in one service because buying a ticket and
 // exiting a gate must debit the wallet and change the ticket in ONE database transaction (ADR 0019).
@@ -8,16 +10,21 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
 builder.AddPostgres();
+builder.AddJwtAuthentication(); // trust Identity's tokens, verified locally with its public keys
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
 app.UseServiceDefaults();
+app.UseAuthentication(); // reads "Authorization: Bearer …" and builds the user, or leaves it anonymous
+app.UseAuthorization();  // enforces RequireAuthorization: anonymous → 401
 
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
+
+app.MapWalletEndpoints();
 
 await app.RunAsync();
 
