@@ -8,7 +8,7 @@ using Microsoft.IdentityModel.Tokens;
 
 namespace TransitPass.Core.Tests;
 
-public sealed class WalletAuthTests
+public sealed class WalletAuthTests(PostgresFixture db)
 {
     private const string Me = "/api/v1/wallet/me";
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
@@ -36,14 +36,14 @@ public sealed class WalletAuthTests
     [Fact]
     public async Task No_token_is_401_problem_with_www_authenticate()
     {
-        await using var factory = new CoreFactory();
+        await using var factory = new CoreFactory(db);
         await ShouldBe401(await GetMe(factory.CreateClient(), null));
     }
 
     [Fact]
     public async Task Valid_token_is_200_and_me_is_the_token_subject()
     {
-        await using var factory = new CoreFactory();
+        await using var factory = new CoreFactory(db);
         Guid userId = Guid.CreateVersion7();
 
         var response = await GetMe(factory.CreateClient(), factory.Identity.Token(sub: userId));
@@ -55,7 +55,7 @@ public sealed class WalletAuthTests
     [Fact]
     public async Task Keys_are_fetched_once_and_cached_across_requests()
     {
-        await using var factory = new CoreFactory();
+        await using var factory = new CoreFactory(db);
         var client = factory.CreateClient();
 
         for (int i = 0; i < 10; i++)
@@ -83,7 +83,7 @@ public sealed class WalletAuthTests
     [MemberData(nameof(BadTokens))]
     public async Task Bad_tokens_are_401(string kind)
     {
-        await using var factory = new CoreFactory();
+        await using var factory = new CoreFactory(db);
         FakeIdentity id = factory.Identity;
 
         string token = kind switch
@@ -105,7 +105,7 @@ public sealed class WalletAuthTests
     [Fact]
     public async Task Rotated_key_is_picked_up_after_one_refresh()
     {
-        await using var factory = new CoreFactory();
+        await using var factory = new CoreFactory(db);
         var client = factory.CreateClient();
         (await GetMe(client, factory.Identity.Token())).StatusCode.ShouldBe(HttpStatusCode.OK);
 
@@ -131,7 +131,7 @@ public sealed class WalletAuthTests
     [Fact]
     public async Task A_flood_of_unknown_kids_does_not_flood_identity()
     {
-        await using var factory = new CoreFactory();
+        await using var factory = new CoreFactory(db);
         var client = factory.CreateClient();
         (await GetMe(client, factory.Identity.Token())).StatusCode.ShouldBe(HttpStatusCode.OK);
 
@@ -146,7 +146,7 @@ public sealed class WalletAuthTests
     [Fact]
     public async Task Identity_down_after_keys_are_cached_still_verifies()
     {
-        await using var factory = new CoreFactory();
+        await using var factory = new CoreFactory(db);
         var client = factory.CreateClient();
         (await GetMe(client, factory.Identity.Token())).StatusCode.ShouldBe(HttpStatusCode.OK);
 

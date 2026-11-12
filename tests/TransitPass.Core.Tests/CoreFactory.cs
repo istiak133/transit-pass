@@ -16,9 +16,17 @@ namespace TransitPass.Core.Tests;
 /// Hosts Core in memory and plays Identity's part: it owns a signing key, serves the matching JWKS
 /// through a stub HTTP handler, and can sign any token a test needs (valid, expired, forged…).
 /// </summary>
-public sealed class CoreFactory : WebApplicationFactory<Program>
+public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Program>
 {
     public FakeIdentity Identity { get; } = new();
+
+    /// <summary>A client that sends a valid token for <paramref name="userId"/> on every request.</summary>
+    public HttpClient ClientFor(Guid userId)
+    {
+        var client = CreateClient();
+        client.DefaultRequestHeaders.Authorization = new("Bearer", Identity.Token(sub: userId));
+        return client;
+    }
 
     public override async ValueTask DisposeAsync()
     {
@@ -29,7 +37,7 @@ public sealed class CoreFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
-        builder.UseSetting("ConnectionStrings:Default", "Host=localhost"); // these tests never touch the DB
+        builder.UseSetting("ConnectionStrings:Default", db.ConnectionString); // already migrated by the fixture
         builder.UseSetting("Jwt:JwksUrl", "http://identity.test/.well-known/jwks.json");
         builder.UseSetting("Jwt:RequireHttps", "false");
         builder.UseSetting("Jwt:KeyRefreshMinInterval", "00:00:01"); // the library's minimum
