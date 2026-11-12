@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-117%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-129%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -17,9 +17,9 @@
 A metro ticketing backend built around one passenger, **Rafi**: he signs up, tops up his wallet, buys a ticket from **Uttara North** to **Motijheel**, taps in at the gate, rides, and taps out.
 
 - 🏗️ **Architecture:** four .NET 10 services behind a YARP API gateway, each with its own PostgreSQL database
-- ✅ **Built so far:** the platform (gateway, rate limiting, errors, health, CI), stations, the track graph with fare quotes (Dijkstra), and user registration
-- 🛣️ **In progress:** login with ES256 JWT, then wallet and ledger, top-ups, tickets, signed QR, gates (see [Roadmap](#-roadmap))
-- 🧪 **Quality:** 117 tests, database tests against a real PostgreSQL 17 (Testcontainers), and CI with CodeQL on every pull request
+- ✅ **Built so far:** the platform (gateway, rate limiting, errors, health, CI), stations, the track graph with fare quotes (Dijkstra), sign-up, and login with ES256-signed JWTs and a JWKS endpoint
+- 🛣️ **In progress:** protected endpoints, then wallet and ledger, top-ups, tickets, signed QR, gates (see [Roadmap](#-roadmap))
+- 🧪 **Quality:** 129 tests, database tests against a real PostgreSQL 17 (Testcontainers), and CI with CodeQL on every pull request
 - 📚 **Decisions:** 19 [Architecture Decision Records](docs/adr/README.md) and a [PRD](docs/PRD.md)
 
 ---
@@ -65,6 +65,10 @@ TransitPass started from studying an open-source student metro ticketing project
 - Phone numbers are **normalized to E.164**: `01711000001`, `8801711000001` and `+880 1711-000001` are one phone, so one account
 - Passwords hashed with **PBKDF2-HMAC-SHA256**, 600,000 iterations and a random salt per user, never stored or returned
 - **One phone, one account,** even when sign-ups race (tested with 10 at once)
+- **Login** returns a 15-minute **ES256-signed JWT** (`sub`, `iss`, `aud`, `iat`, `exp`, `jti`; no personal data inside)
+- **`/.well-known/jwks.json`** publishes the public key with a `kid` (RFC 7638 thumbprint), so other services can verify tokens without calling Identity and without the private key
+- **One answer for every failed login:** unknown phone, wrong password or a malformed phone all get the same `401`, and take the same time (a dummy PBKDF2 check runs when the phone has no account)
+- **At most 5 login attempts per minute per phone,** across formats and IPs (`429` with `Retry-After`)
 
 **🛠️ Engineering**
 - Database-per-service: each service logs in as its own PostgreSQL role, and the others cannot even connect
@@ -76,7 +80,7 @@ TransitPass started from studying an open-source student metro ticketing project
 ```mermaid
 flowchart LR
     C["Client<br/>(app, gate, curl)"] -->|HTTPS| G["Gateway · YARP :5100<br/>routing · rate limit · request id"]
-    G -->|/api/v1/identity| I["Identity service :5101<br/>users · passwords · (next: JWT)"]
+    G -->|/api/v1/identity| I["Identity service :5101<br/>users · passwords · ES256 JWT · JWKS"]
     G -->|/api/v1/network| N["Network service :5102<br/>stations · track graph · fares"]
     G -->|/api/v1/wallet · tickets · gate| T["Transit Core :5103<br/>(next: wallet · tickets · gate)"]
     I --> IDB[("identity_db<br/>role identity_svc")]
@@ -181,6 +185,7 @@ erDiagram
 │   └── Services/
 │       ├── Identity/TransitPass.Identity.Api/
 │       │   ├── Users/                            User, mapping, PhoneNumber, PasswordHasher, register endpoint
+│       │   ├── Sessions/                         ES256 SigningKey, TokenIssuer, LoginThrottle, login + JWKS endpoints
 │       │   └── Data/                             DbContext, migrations
 │       ├── Network/TransitPass.Network.Api/
 │       │   ├── Stations/                         Station, mapping, endpoints
@@ -219,6 +224,7 @@ erDiagram
 | `POSTGRES_HOST_PORT` | Compose | Host port for PostgreSQL (default `5432`; e.g. `55432` if it's taken) |
 | `ConnectionStrings__Default` | each service | Its own database. Outside Docker, set it through user secrets |
 | `Database__MigrateOnStartup` | each service | Apply migrations on start (`true` in Development only) |
+| `JWT_SIGNING_KEY_PEM` → `Jwt__SigningKeyPem` | Compose → Identity | ES256 private key (EC P-256, PKCS#8 PEM). Required outside Development; generated by `dev-secrets.sh` |
 | `RateLimiting__TokenLimit`, `RateLimiting__TokensPerPeriod` | gateway | Rate-limit bucket size and refill per second |
 
 ### 🐳 Run with Docker
@@ -277,6 +283,11 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Phone normalization: 6 valid formats, 10 invalid ones (landline, foreign, wrong length, letters, Bengali digits) | `tests/TransitPass.Identity.Tests/UnitTests.cs` |
 | PBKDF2: round trip, a different salt every time, malformed hashes never verify | `UnitTests.cs` |
 | The database refuses a non-E.164 phone even when the app is bypassed | `RegisterEndpointTests.cs` |
+| A login token verifies with **only the public key from JWKS** (ES256, right `kid`, `sub`, 15 minutes, no phone inside) | `tests/TransitPass.Identity.Tests/SessionEndpointTests.cs` |
+| A token with a swapped payload fails signature verification | `SessionEndpointTests.cs` |
+| Wrong password, unknown phone and a malformed phone get the identical `401` | `SessionEndpointTests.cs` |
+| The 6th login attempt in a minute for one phone is `429`, even with mixed formats and the right password | `SessionEndpointTests.cs` |
+| JWKS never contains the private `d`; production refuses to start without a key; one PEM gives one `kid`; non-P-256 keys are rejected | `SessionEndpointTests.cs`, `SigningKeyTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
 | Fare quotes end to end, and 400 / 404 / 422 problems with their codes | `tests/TransitPass.Network.Tests/FareEndpointTests.cs`, `RouteGraphTests.cs` |
@@ -298,6 +309,8 @@ All paths go through the gateway at `http://localhost:5100`.
 | GET | `/api/v1/network/stations/{id}` | One station, or `404 station.not_found` |
 | GET | `/api/v1/network/fares/quote?from=&to=` | `{ from, to, distanceM, farePoisha }` for the shortest track distance |
 | POST | `/api/v1/identity/users` | Sign up `{ phone, name, password }` → `201 Created` + `Location`, body `{ id, phone, name, createdAt }` |
+| POST | `/api/v1/identity/sessions` | Log in `{ phone, password }` → `200 { accessToken, tokenType: "Bearer", expiresIn: 900, expiresAt }` |
+| GET | `/.well-known/jwks.json` (Identity, internal) | The public signing key(s) as a JWK set, `Cache-Control: max-age=300` |
 
 ```bash
 curl -s "localhost:5100/api/v1/network/fares/quote?from=uttara-north&to=motijheel"
@@ -319,11 +332,12 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 
 | Status | When | Codes so far |
 |---|---|---|
-| `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password` |
+| `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password`, `identity.invalid_request` |
+| `401` | Login failed (always the same answer) | `identity.invalid_credentials` |
 | `404` | It doesn't exist | `station.not_found` |
 | `409` | It conflicts with what's already there | `user.phone_taken` |
 | `422` | Valid request, but a business rule says no | `fare.no_route` |
-| `429` | Too many requests from one client | (gateway rate limit, with `Retry-After`) |
+| `429` | Too many requests | gateway limit per IP; `identity.too_many_attempts` (5 logins per minute per phone), both with `Retry-After` |
 | `503` | The database is unreachable | (`/health/ready`) |
 
 ## 💰 Fare model
@@ -394,7 +408,9 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - 🔒 **Secrets:** none in the repository. Local passwords are random, in a git-ignored `.env`.
 - 🐳 **Containers** run as a non-root user, and restores are locked (`packages.lock.json`), so a build can't pull a different dependency than the one reviewed.
 - 🔍 **CodeQL** scans every pull request, and findings are fixed in code, not dismissed.
-- 🔜 **Next (Phase 5–6):** ES256 JWT signed only by Identity, a public key published at `/.well-known/jwks.json` with a `kid` for rotation, and verification in each service with the public key only.
+- 🎫 **Tokens:** ES256 (ECDSA P-256). Only Identity holds the private key. Others get the public key from `/.well-known/jwks.json`, so a compromised service can verify tokens but never mint them. Tokens last 15 minutes, because a JWT can't be recalled once issued. The `kid` lets keys rotate without breaking tokens already issued.
+- 🚪 **Login hardening:** one uniform `401` with equal timing for unknown phones and wrong passwords, plus 5 attempts per minute per phone on top of the gateway's per-IP limit.
+- 🔜 **Next (Phase 6):** each service verifies the token with the public key and protects its endpoints (`401` without a token, `403` for someone else's data).
 
 ## 📌 Key decisions and trade-offs
 
@@ -416,7 +432,8 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 
 ## 🚧 Known limitations
 
-- 🔐 **No login yet.** Users can sign up but not sign in, so no endpoint is protected yet (Phases 5–6).
+- 🔐 **No endpoint is protected yet.** Tokens are issued and verifiable, and enforcing them in Core comes in Phase 6. There's no refresh token yet, so after 15 minutes the user logs in again.
+- 🔒 **The per-phone login limit is in memory,** so it's per Identity instance and resets on restart (Redis is in the bonus list). Someone can also keep one phone's login blocked for a minute by failing on purpose: that trade buys protection from password guessing.
 - 💳 **No wallet, tickets or gates yet.** Transit Core is wired to its database but has no features yet.
 - 📱 **Bangladeshi mobile numbers only,** and phones are not verified (no OTP yet).
 - 🗺️ **Seed network is four stations.** Station and track changes are made through migrations, and the fare graph picks them up on restart.
@@ -435,8 +452,8 @@ Each phase is one small pull request with its own tests.
 | 2 | Stations in PostgreSQL with EF Core | ✅ #7 |
 | 3 | Track graph and fare quotes (Dijkstra) | ✅ #8 |
 | 4 | Sign-up | ✅ #9 |
-| 5 | Login: ES256 JWT and a JWKS endpoint | ⏳ next |
-| 6 | Protected endpoints across services (401 / 403) | |
+| 5 | Login: ES256 JWT and a JWKS endpoint | ✅ #11 |
+| 6 | Protected endpoints across services (401 / 403) | ⏳ next |
 | 7 | Wallet and double-entry ledger, history with cursor pagination | |
 | 8 | Top-up through an HMAC-signed payment webhook, an inbox for duplicates | |
 | 9 | Ticket purchase: `Idempotency-Key`, atomic debit, a 200-way concurrency test | |

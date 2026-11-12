@@ -11,6 +11,9 @@ x-service: &service
       condition: service_healthy
   environment: &service-env
     ASPNETCORE_ENVIRONMENT: Production
+    # This stack is for running locally, so each service creates its own tables on start.
+    # A real deployment keeps this off and runs migrations once as a deploy step.
+    Database__MigrateOnStartup: "true"
 
 services:
   postgres:
@@ -42,6 +45,7 @@ services:
     environment:
       <<: *service-env
       ConnectionStrings__Default: Host=postgres;Database=identity_db;Username=identity_svc;Password=${IDENTITY_DB_PASSWORD}
+      Jwt__SigningKeyPem: ${JWT_SIGNING_KEY_PEM:?run ./deploy/dev-secrets.sh first}
 
   network:
     <<: *service

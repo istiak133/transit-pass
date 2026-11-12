@@ -1,5 +1,6 @@
 using TransitPass.BuildingBlocks.Hosting;
 using TransitPass.Identity.Api.Data;
+using TransitPass.Identity.Api.Sessions;
 using TransitPass.Identity.Api.Users;
 
 // Identity service. It owns its own database (identity_db) and nothing else reads it.
@@ -9,6 +10,10 @@ var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
 builder.AddPostgres();
 builder.AddIdentityDatabase();
+builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.Section));
+builder.Services.AddSingleton<SigningKey>();
+builder.Services.AddSingleton<TokenIssuer>();
+builder.Services.AddSingleton<LoginThrottle>();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
@@ -21,6 +26,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapUserEndpoints();
+app.MapSessionEndpoints();
 
 await app.MigrateIfEnabledAsync();
 
