@@ -9,6 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
 using TransitPass.BuildingBlocks.Auth;
+using TransitPass.Core.Api.Fares;
 
 namespace TransitPass.Core.Tests;
 
@@ -19,6 +20,9 @@ namespace TransitPass.Core.Tests;
 public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Program>
 {
     public FakeIdentity Identity { get; } = new();
+
+    /// <summary>Plays the Network service's fare endpoint.</summary>
+    public FakeNetwork Network { get; } = new();
 
     /// <summary>This factory's payment webhook secret: random, so no secret is ever written in the repo.</summary>
     public string WebhookSecret { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
@@ -35,6 +39,7 @@ public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Prog
     {
         await base.DisposeAsync();
         Identity.Dispose();
+        Network.Dispose();
     }
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -46,7 +51,10 @@ public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Prog
         builder.UseSetting("Jwt:KeyRefreshMinInterval", "00:00:01"); // the library's minimum
         builder.UseSetting("Payments:WebhookSecret", WebhookSecret);
         builder.ConfigureTestServices(services =>
-            services.AddHttpClient(JwtAuthentication.JwksHttpClient).ConfigurePrimaryHttpMessageHandler(() => Identity));
+        {
+            services.AddHttpClient(JwtAuthentication.JwksHttpClient).ConfigurePrimaryHttpMessageHandler(() => Identity);
+            services.AddHttpClient<IFareQuotes, NetworkFareClient>().ConfigurePrimaryHttpMessageHandler(() => Network);
+        });
     }
 }
 

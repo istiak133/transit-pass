@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
+using TransitPass.Core.Api.Idempotency;
 using TransitPass.Core.Api.Ledger;
 using TransitPass.Core.Api.Payments;
+using TransitPass.Core.Api.Tickets;
 using TransitPass.Core.Api.Topups;
 using TransitPass.Core.Api.Wallets;
 
@@ -16,6 +18,10 @@ public sealed class CoreDbContext(DbContextOptions<CoreDbContext> options) : DbC
     public DbSet<Topup> Topups => Set<Topup>();
 
     public DbSet<PaymentEvent> PaymentEvents => Set<PaymentEvent>();
+
+    public DbSet<Ticket> Tickets => Set<Ticket>();
+
+    public DbSet<IdempotencyRecord> IdempotencyKeys => Set<IdempotencyRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

@@ -30,6 +30,7 @@ public sealed class ResultTests
     [InlineData(ErrorType.Forbidden, 403)]
     [InlineData(ErrorType.NotFound, 404)]
     [InlineData(ErrorType.Conflict, 409)]
+    [InlineData(ErrorType.Unavailable, 503)]
     [InlineData(ErrorType.BusinessRule, 422)]
     public void Error_type_maps_to_http_status(ErrorType type, int expected) =>
         type.ToStatusCode().ShouldBe(expected);
