@@ -20,6 +20,12 @@ public sealed class CoreFactory : WebApplicationFactory<Program>
 {
     public FakeIdentity Identity { get; } = new();
 
+    public override async ValueTask DisposeAsync()
+    {
+        await base.DisposeAsync();
+        Identity.Dispose();
+    }
+
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseEnvironment("Testing");
@@ -35,6 +41,7 @@ public sealed class CoreFactory : WebApplicationFactory<Program>
 /// <summary>A stand-in for the Identity service's key and JWKS endpoint.</summary>
 public sealed class FakeIdentity : HttpMessageHandler
 {
+    private readonly List<ECDsa> _owned = []; // every key this fake creates, disposed with it
     private int _fetches;
 
     public FakeIdentity() => SigningKey = NewKey();
@@ -51,9 +58,12 @@ public sealed class FakeIdentity : HttpMessageHandler
     /// <summary>Publishes a brand-new key, as Identity does when it rotates.</summary>
     public ECDsaSecurityKey Rotate() => SigningKey = NewKey();
 
-    public static ECDsaSecurityKey NewKey()
+    /// <summary>A fresh P-256 key that this fake owns (and disposes).</summary>
+    public ECDsaSecurityKey NewKey()
     {
-        var key = new ECDsaSecurityKey(ECDsa.Create(ECCurve.NamedCurves.nistP256));
+        var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        _owned.Add(ecdsa);
+        var key = new ECDsaSecurityKey(ecdsa);
         key.KeyId = Base64UrlEncoder.Encode(key.ComputeJwkThumbprint());
         return key;
     }
@@ -80,16 +90,33 @@ public sealed class FakeIdentity : HttpMessageHandler
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         Interlocked.Increment(ref _fetches);
+        return Task.FromResult(Respond());
+    }
+
+    // The caller (HttpClient) owns and disposes the response.
+    private HttpResponseMessage Respond()
+    {
         if (Down)
         {
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+            return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
         }
 
         JsonWebKey jwk = JsonWebKeyConverter.ConvertFromECDsaSecurityKey(SigningKey);
         string json = $$"""{"keys":[{"kty":"EC","crv":"{{jwk.Crv}}","alg":"ES256","use":"sig","kid":"{{SigningKey.KeyId}}","x":"{{jwk.X}}","y":"{{jwk.Y}}"}]}""";
-        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        return new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json"),
-        });
+        };
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _owned.ForEach(k => k.Dispose());
+            _owned.Clear();
+        }
+
+        base.Dispose(disposing);
     }
 }

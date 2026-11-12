@@ -91,7 +91,7 @@ public sealed class WalletAuthTests
             "expired" => id.Token(expiresIn: TimeSpan.FromMinutes(-2)),          // beyond the 30 s clock skew
             "wrong-audience" => id.Token(audience: "someone-else"),
             "wrong-issuer" => id.Token(issuer: "evil-issuer"),
-            "unknown-key" => id.Token(key: FakeIdentity.NewKey()),               // right shape, not Identity's key
+            "unknown-key" => id.Token(key: id.NewKey()),               // right shape, not Identity's key
             "tampered-payload" => Tamper(id.Token()),
             "alg-none" => Unsigned(),
             "hs256" => Hs256(),
@@ -137,7 +137,7 @@ public sealed class WalletAuthTests
 
         for (int i = 0; i < 30; i++)
         {
-            await ShouldBe401(await GetMe(client, factory.Identity.Token(key: FakeIdentity.NewKey())));
+            await ShouldBe401(await GetMe(client, factory.Identity.Token(key: factory.Identity.NewKey())));
         }
 
         factory.Identity.Fetches.ShouldBeLessThanOrEqualTo(2); // the 1 s minimum gap caps re-fetches
@@ -152,7 +152,7 @@ public sealed class WalletAuthTests
 
         factory.Identity.Down = true;
         await Task.Delay(TimeSpan.FromSeconds(1.2), Ct);
-        await GetMe(client, factory.Identity.Token(key: FakeIdentity.NewKey())); // forces a refresh, which fails
+        await GetMe(client, factory.Identity.Token(key: factory.Identity.NewKey())); // forces a refresh, which fails
 
         (await GetMe(client, factory.Identity.Token())).StatusCode.ShouldBe(HttpStatusCode.OK); // last good keys kept
     }
