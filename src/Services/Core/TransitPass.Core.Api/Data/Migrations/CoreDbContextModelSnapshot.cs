@@ -53,6 +53,11 @@ namespace TransitPass.Core.Api.Data.Migrations
                     b.HasKey("Id")
                         .HasName("pk_ledger_entries");
 
+                    b.HasIndex("RefId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_ledger_entries_topup_ref")
+                        .HasFilter("type = 'TopUp'");
+
                     b.HasIndex("WalletId", "Id")
                         .HasDatabaseName("ix_ledger_entries_wallet_id_id");
 
@@ -61,6 +66,82 @@ namespace TransitPass.Core.Api.Data.Migrations
                             t.HasCheckConstraint("ck_ledger_entries_amount_non_zero", "amount_poisha <> 0");
 
                             t.HasCheckConstraint("ck_ledger_entries_type", "type IN ('TopUp', 'Purchase', 'Refund', 'Surcharge')");
+                        });
+                });
+
+            modelBuilder.Entity("TransitPass.Core.Api.Payments.PaymentEvent", b =>
+                {
+                    b.Property<string>("Provider")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("provider");
+
+                    b.Property<string>("EventId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("event_id");
+
+                    b.Property<DateTimeOffset>("ReceivedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("received_at");
+
+                    b.Property<Guid>("TopupId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("topup_id");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("type");
+
+                    b.HasKey("Provider", "EventId")
+                        .HasName("pk_payment_events");
+
+                    b.ToTable("payment_events", (string)null);
+                });
+
+            modelBuilder.Entity("TransitPass.Core.Api.Topups.Topup", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<long>("AmountPoisha")
+                        .HasColumnType("bigint")
+                        .HasColumnName("amount_poisha");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("completed_at");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("status");
+
+                    b.Property<Guid>("WalletId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("wallet_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_topups");
+
+                    b.HasIndex("WalletId", "Id")
+                        .HasDatabaseName("ix_topups_wallet_id_id");
+
+                    b.ToTable("topups", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_topups_amount_positive", "amount_poisha > 0");
+
+                            t.HasCheckConstraint("ck_topups_completed_at", "(status = 'Pending') = (completed_at IS NULL)");
+
+                            t.HasCheckConstraint("ck_topups_status", "status IN ('Pending', 'Succeeded', 'Failed')");
                         });
                 });
 
@@ -105,6 +186,16 @@ namespace TransitPass.Core.Api.Data.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_ledger_entries_wallet");
+                });
+
+            modelBuilder.Entity("TransitPass.Core.Api.Topups.Topup", b =>
+                {
+                    b.HasOne("TransitPass.Core.Api.Wallets.Wallet", null)
+                        .WithMany()
+                        .HasForeignKey("WalletId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_topups_wallet");
                 });
 #pragma warning restore 612, 618
         }

@@ -20,6 +20,9 @@ public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Prog
 {
     public FakeIdentity Identity { get; } = new();
 
+    /// <summary>This factory's payment webhook secret: random, so no secret is ever written in the repo.</summary>
+    public string WebhookSecret { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+
     /// <summary>A client that sends a valid token for <paramref name="userId"/> on every request.</summary>
     public HttpClient ClientFor(Guid userId)
     {
@@ -41,6 +44,7 @@ public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Prog
         builder.UseSetting("Jwt:JwksUrl", "http://identity.test/.well-known/jwks.json");
         builder.UseSetting("Jwt:RequireHttps", "false");
         builder.UseSetting("Jwt:KeyRefreshMinInterval", "00:00:01"); // the library's minimum
+        builder.UseSetting("Payments:WebhookSecret", WebhookSecret);
         builder.ConfigureTestServices(services =>
             services.AddHttpClient(JwtAuthentication.JwksHttpClient).ConfigurePrimaryHttpMessageHandler(() => Identity));
     }

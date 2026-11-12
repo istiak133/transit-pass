@@ -71,6 +71,8 @@ services:
       # Core verifies tokens with Identity's public keys, fetched over the private Compose network.
       Jwt__JwksUrl: http://identity:8080/.well-known/jwks.json
       Jwt__RequireHttps: "false"
+      # HMAC secret shared with the payment provider (deploy/fake-payment.sh signs with the same one).
+      Payments__WebhookSecret: ${PAYMENT_WEBHOOK_SECRET:?run ./deploy/dev-secrets.sh first}
 
   gateway:
     restart: unless-stopped
