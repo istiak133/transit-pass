@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-160%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-201%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -18,8 +18,8 @@ A metro ticketing backend built around one passenger, **Rafi**: he signs up, top
 
 - 🏗️ **Architecture:** four .NET 10 services behind a YARP API gateway, each with its own PostgreSQL database
 - ✅ **Built so far:** the platform (gateway, rate limiting, errors, health, CI), stations, the track graph with fare quotes (Dijkstra), sign-up, login with ES256-signed JWTs, and the first protected endpoint, which Core verifies locally with Identity's public keys
-- 🛣️ **In progress:** top-ups, then tickets, signed QR, gates (see [Roadmap](#-roadmap))
-- 🧪 **Quality:** 160 tests, database tests against a real PostgreSQL 17 (Testcontainers), and CI with CodeQL on every pull request
+- 🛣️ **In progress:** tickets, signed QR, gates (see [Roadmap](#-roadmap))
+- 🧪 **Quality:** 201 tests, database tests against a real PostgreSQL 17 (Testcontainers), and CI with CodeQL on every pull request
 - 📚 **Decisions:** 19 [Architecture Decision Records](docs/adr/README.md) and a [PRD](docs/PRD.md)
 
 ---
@@ -80,6 +80,10 @@ TransitPass started from studying an open-source student metro ticketing project
 - **Append-only ledger:** every taka that moves is a `ledger_entries` row (`TopUp`, `Purchase`, `Refund`, `Surcharge`), never edited or deleted. The balance is a cache of `SUM(amount)`, and both change in **one transaction**
 - **No overspending, even under races:** a posting is one conditional `UPDATE … SET balance = balance + amount WHERE balance + amount >= 0`, and `CHECK (balance_poisha >= 0)` backs it up in the database (20 racing ৳100 debits on ৳1000 → exactly 10 succeed)
 - **History with keyset pagination:** `GET /api/v1/wallet/me/transactions?after=&limit=` returns newest first, served by an index scan on `(wallet_id, id)` in O(log n + page) at any depth
+- **Top-up, credited only by the provider:** `POST /api/v1/wallet/topups` creates a `Pending` top-up (৳10 to ৳50,000) and a checkout URL. No money moves until the payment provider's **HMAC-SHA256-signed webhook** arrives, because a browser saying "paid" proves nothing
+- **Webhook signature:** `Payment-Signature: t=<unix>,v1=<hex>` over `"{t}." + the raw body bytes`, compared with `FixedTimeEquals`; a timestamp older than 5 minutes is refused (replays), and the body is never parsed before the signature checks out
+- **Credited once, whatever arrives:** three guards in one transaction. An **inbox** (`payment_events`, PK `(provider, event_id)`, `INSERT … ON CONFLICT DO NOTHING`) drops re-deliveries; a **state machine** (`UPDATE … WHERE status = 'Pending'`) drops a second event for a finished top-up; a **partial unique index** (`ref_id WHERE type = 'TopUp'`) allows one credit row per top-up even if code skips the first two
+- `deploy/fake-payment.sh` plays the provider locally: it signs and sends the webhook with the secret from `.env`
 
 **🛠️ Engineering**
 - Database-per-service: each service logs in as its own PostgreSQL role, and the others cannot even connect
@@ -93,7 +97,7 @@ flowchart LR
     C["Client<br/>(app, gate, curl)"] -->|HTTPS| G["Gateway · YARP :5100<br/>routing · rate limit · request id"]
     G -->|/api/v1/identity| I["Identity service :5101<br/>users · passwords · ES256 JWT · JWKS"]
     G -->|/api/v1/network| N["Network service :5102<br/>stations · track graph · fares"]
-    G -->|/api/v1/wallet · tickets · gate| T["Transit Core :5103<br/>verifies JWT · wallet · ledger<br/>(next: top-ups · tickets · gate)"]
+    G -->|/api/v1/wallet · tickets · gate| T["Transit Core :5103<br/>verifies JWT · wallet · ledger · top-ups<br/>(next: tickets · gate)"]
     T -. "public keys (JWKS), cached" .-> I
     I --> IDB[("identity_db<br/>role identity_svc")]
     N --> NDB[("network_db<br/>role network_svc")]
@@ -142,6 +146,8 @@ erDiagram
 ```mermaid
 erDiagram
     WALLETS ||--o{ LEDGER_ENTRIES : "has history"
+    WALLETS ||--o{ TOPUPS : "is topped up by"
+    TOPUPS ||--o{ PAYMENT_EVENTS : "is completed by (no FK)"
     WALLETS {
         uuid id PK "UUIDv7"
         uuid user_id UK "from the token sub, no FK"
@@ -153,12 +159,26 @@ erDiagram
         uuid wallet_id FK "ON DELETE RESTRICT"
         bigint amount_poisha "CHECK <> 0"
         varchar type "TopUp, Purchase, Refund, Surcharge"
-        uuid ref_id "top-up or ticket id"
+        uuid ref_id "top-up or ticket id; unique for TopUp"
         timestamptz created_at
+    }
+    TOPUPS {
+        uuid id PK "UUIDv7"
+        uuid wallet_id FK "ON DELETE RESTRICT"
+        bigint amount_poisha "CHECK > 0"
+        varchar status "Pending, Succeeded, Failed"
+        timestamptz completed_at "NULL exactly while Pending"
+    }
+    PAYMENT_EVENTS {
+        varchar provider PK
+        varchar event_id PK "the provider's id"
+        varchar type
+        uuid topup_id "as claimed, no FK"
+        timestamptz received_at
     }
 ```
 
-`users` lives in `identity_db`. `stations` and `segments` live in `network_db`. `wallets` and `ledger_entries` live in `core_db`; `wallets.user_id` holds an Identity user id with no FK, because that table is in another database.
+`users` lives in `identity_db`. `stations` and `segments` live in `network_db`. `wallets`, `ledger_entries`, `topups` and `payment_events` live in `core_db`; `wallets.user_id` holds an Identity user id with no FK, because that table is in another database.
 
 ### 📋 Tables
 
@@ -168,7 +188,9 @@ erDiagram
 | `stations` | network_db | The stations, with readable ids like `agargaon` | `pk_stations (id)` · `ux_stations_name` unique · `ck_stations_id_slug` CHECK |
 | `segments` | network_db | One row per stretch of track and its length | `pk_segments (station_a, station_b)` · 2 FKs → `stations` with `ON DELETE RESTRICT` · `ck_segments_canonical_order` CHECK `station_a < station_b` (byte collation) · `ck_segments_distance_positive` · `ix_segments_station_b` |
 | `wallets` | core_db | One wallet per user and its current balance (a cache of the ledger sum) | `pk_wallets (id)` · `ux_wallets_user_id` unique · `ck_wallets_balance_non_negative` CHECK `balance_poisha >= 0` |
-| `ledger_entries` | core_db | Every movement of money, append-only | `pk_ledger_entries (id)` · `fk_ledger_entries_wallet` → `wallets` `ON DELETE RESTRICT` · `ck_ledger_entries_amount_non_zero` · `ck_ledger_entries_type` · `ix_ledger_entries_wallet_id_id (wallet_id, id)` |
+| `ledger_entries` | core_db | Every movement of money, append-only | `pk_ledger_entries (id)` · `fk_ledger_entries_wallet` → `wallets` `ON DELETE RESTRICT` · `ck_ledger_entries_amount_non_zero` · `ck_ledger_entries_type` · `ix_ledger_entries_wallet_id_id (wallet_id, id)` · `ux_ledger_entries_topup_ref` partial unique `(ref_id) WHERE type = 'TopUp'` |
+| `topups` | core_db | A request to add money and its state | `pk_topups (id)` · `fk_topups_wallet` RESTRICT · `ck_topups_amount_positive` · `ck_topups_status` · `ck_topups_completed_at` CHECK `(status = 'Pending') = (completed_at IS NULL)` · `ix_topups_wallet_id_id` |
+| `payment_events` | core_db | The inbox: every provider notification already processed | `pk_payment_events (provider, event_id)` |
 
 - 💰 Money is **integer poisha** (৳1 = 100), never a float.
 - 🕒 Times are `timestamptz` (stored in UTC). User ids are **UUIDv7**: unique without coordination, and time-ordered, so new rows land at the right edge of the B+ tree index.
@@ -177,7 +199,9 @@ erDiagram
 
 - 📇 `ix_ledger_entries_wallet_id_id` does two jobs: it serves the history page (`WHERE wallet_id = … AND id < cursor ORDER BY id DESC`, an *Index Scan Backward*) and it indexes the foreign key.
 
-**Next tables** (designed, built phase by phase): `topups`, `tickets`, `journeys`, `gate_taps`, `gate_devices`, idempotency records.
+- 🧩 `ux_ledger_entries_topup_ref` is a **partial** index: only `TopUp` rows are in it, so a ticket id can still appear on a purchase and later on its refund.
+
+**Next tables** (designed, built phase by phase): `tickets`, `journeys`, `gate_taps`, `gate_devices`, idempotency records.
 
 ## 🧰 Tech stack
 
@@ -231,11 +255,14 @@ erDiagram
 │       └── Core/TransitPass.Core.Api/
 │           ├── Wallets/                          Wallet, mapping, /wallet/me + /wallet/me/transactions
 │           ├── Ledger/                           LedgerEntry, mapping, LedgerBook (the only code that moves money)
+│           ├── Topups/                           Topup (state machine), mapping, POST/GET /wallet/topups
+│           ├── Payments/                         WebhookSignature (HMAC), inbox PaymentEvent, the webhook
 │           └── Data/                             DbContext, migrations
 ├── tests/                                        one test project per service + building blocks + gateway
 ├── deploy/
 │   ├── postgres/init.sh                          one database + one login role per service
-│   └── dev-secrets.sh                            random local passwords into .env (git-ignored)
+│   ├── dev-secrets.sh                            random local passwords and keys into .env (git-ignored)
+│   └── fake-payment.sh                           plays the payment provider: signs and sends a webhook
 ├── docs/
 │   ├── PRD.md                                    product requirements
 │   └── adr/                                      19 architecture decision records
@@ -265,6 +292,7 @@ erDiagram
 | `Database__MigrateOnStartup` | each service | Apply migrations on start (`true` in Development only) |
 | `Jwt__JwksUrl`, `Jwt__RequireHttps` | Core (any verifying service) | Where Identity's public keys are, and whether to insist on HTTPS (off inside the private Compose network) |
 | `JWT_SIGNING_KEY_PEM` → `Jwt__SigningKeyPem` | Compose → Identity | ES256 private key (EC P-256, PKCS#8 PEM). Required outside Development; generated by `dev-secrets.sh` |
+| `PAYMENT_WEBHOOK_SECRET` → `Payments__WebhookSecret` | Compose → Core | HMAC secret shared with the payment provider (at least 32 characters). Required outside Development; generated by `dev-secrets.sh` |
 | `RateLimiting__TokenLimit`, `RateLimiting__TokensPerPeriod` | gateway | Rate-limit bucket size and refill per second |
 
 ### 🐳 Run with Docker
@@ -336,6 +364,13 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Credit and debit keep `SUM(ledger) == balance`; an overdraft is refused and leaves no row; a posting rolls back with its caller's transaction | `tests/TransitPass.Core.Tests/LedgerBookTests.cs` |
 | 20 racing ৳100 debits on ৳1000 → exactly 10 succeed, balance ends at 0 | `LedgerBookTests.cs` |
 | The database refuses a negative balance, a zero amount and an unknown entry type, even when the app is bypassed | `LedgerBookTests.cs` |
+| Creating a top-up is `201 Pending` and moves no money; bad amounts are `400`; another user's top-up is `404` | `tests/TransitPass.Core.Tests/TopupFlowTests.cs` |
+| A signed success webhook credits once, with a `TopUp` ledger row whose `refId` is the top-up | `TopupFlowTests.cs` |
+| The same event twice → `duplicate`; 10 simultaneous deliveries → 1 applied; 10 different events for one top-up → 1 applied, 9 `already_final` | `TopupFlowTests.cs` |
+| A failed payment credits nothing and a later success can't revive it | `TopupFlowTests.cs` |
+| Forged signature `401` (no inbox row), replay older than 5 min `401`, amount mismatch `422` with full rollback, unknown top-up `404`, malformed event `400`, body over 64 KB `400` | `TopupFlowTests.cs` |
+| The database allows only one `TopUp` ledger row per top-up | `TopupFlowTests.cs` |
+| HMAC: one changed byte, re-spaced JSON, another secret, a moved timestamp and malformed headers all fail; rotation with two `v1` values works | `tests/TransitPass.Core.Tests/WebhookSignatureTests.cs` |
 | The gateway passes the `Authorization` header through unchanged | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
@@ -361,6 +396,9 @@ All paths go through the gateway at `http://localhost:5100`.
 | POST | `/api/v1/identity/sessions` | Log in `{ phone, password }` → `200 { accessToken, tokenType: "Bearer", expiresIn: 900, expiresAt }` |
 | GET | `/.well-known/jwks.json` (Identity, internal) | The public signing key(s) as a JWK set, `Cache-Control: max-age=300` |
 | GET | `/api/v1/wallet/me` 🔒 | `Authorization: Bearer <token>` → `200 { walletId, userId, balancePoisha, currency }` (created on first visit); no or bad token → `401 auth.unauthenticated` |
+| POST | `/api/v1/wallet/topups` 🔒 | `{ amountPoisha }` (1000–5000000) → `201` + `Location`, `{ id, amountPoisha, status: "Pending", createdAt, completedAt, checkoutUrl }` |
+| GET | `/api/v1/wallet/topups/{id}` 🔒 | The caller's own top-up; anyone else's → `404 topup.not_found` |
+| POST | `/api/v1/payments/webhook` | For the payment provider, authenticated by `Payment-Signature`, not a token → `200 { result: "applied" \| "duplicate" \| "already_final" }` |
 | GET | `/api/v1/wallet/me/transactions?after=&limit=` 🔒 | `200 { items: [{ id, amountPoisha, type, refId, createdAt }], nextCursor }`, newest first; bad cursor → `400 pagination.invalid_cursor` |
 
 ```bash
@@ -383,12 +421,12 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 
 | Status | When | Codes so far |
 |---|---|---|
-| `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password`, `identity.invalid_request` |
-| `401` | Login failed (always the same answer), or no or bad access token (`WWW-Authenticate: Bearer`) | `identity.invalid_credentials`, `auth.unauthenticated` |
-| `403` | Valid token, but not allowed | `auth.forbidden` (used from Phase 7: someone else's data) |
-| `404` | It doesn't exist | `station.not_found` |
+| `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password`, `identity.invalid_request`, `pagination.invalid_cursor`, `topup.invalid_amount`, `payment.invalid_event`, `payment.body_too_large` |
+| `401` | Login failed (always the same answer), or no or bad access token (`WWW-Authenticate: Bearer`) | `identity.invalid_credentials`, `auth.unauthenticated`, `payment.invalid_signature` |
+| `403` | Valid token, but not allowed | `auth.forbidden` (no route needs it yet: someone else's data answers `404`, so ids can't be probed) |
+| `404` | It doesn't exist (or isn't yours) | `station.not_found`, `topup.not_found`, `payment.unknown_topup` |
 | `409` | It conflicts with what's already there | `user.phone_taken` |
-| `422` | Valid request, but a business rule says no | `fare.no_route` |
+| `422` | Valid request, but a business rule says no | `fare.no_route`, `payment.amount_mismatch`, `wallet.insufficient_funds` (from Phase 9) |
 | `429` | Too many requests | gateway limit per IP; `identity.too_many_attempts` (5 logins per minute per phone), both with `Retry-After` |
 | `503` | The database is unreachable | (`/health/ready`) |
 
@@ -443,9 +481,15 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - ✅ **TransitPass inserts directly.** The `ux_users_phone` unique index decides inside PostgreSQL: the second insert waits for the first transaction, then fails with `23505`, which becomes `409 user.phone_taken`.
 - 🧪 **Proof:** 10 parallel sign-ups with one phone → exactly one `201`, nine `409`, one row.
 
-### Designed (next phases): Rafi's last ৳100
+### Built: a top-up credited once
+- 🎯 **The case:** the provider times out waiting for our `200` and sends the same "payment succeeded" again, or sends two different events for one payment, at the same instant.
+- ❌ **The naive way** checks "already processed?" with a `SELECT`, then credits. Both requests see "no", and Rafi gets ৳1000 for ৳500.
+- ✅ **TransitPass** records the event with `INSERT … ON CONFLICT DO NOTHING` (the second waits on the first's uncommitted row, then inserts nothing), moves the top-up with `UPDATE … WHERE status = 'Pending'` (the second waits on the row lock, re-checks, updates nothing), and a partial unique index refuses a second credit row.
+- 🧪 **Proof:** 10 simultaneous deliveries → 1 applied, 9 `duplicate`; 10 different events → 1 applied, 9 `already_final`; the balance moves once.
+
+### Built, used from Phase 9: Rafi's last ৳100
 - 🎯 Two purchases of a ৳100 ticket with ৳100 in the wallet, at the same instant.
-- 🛡️ A single conditional update, `UPDATE wallets SET balance = balance − fare WHERE id = … AND balance >= fare`, plus `CHECK (balance >= 0)`. The check and the subtraction are one statement, so only one purchase can win.
+- 🛡️ `LedgerBook.PostAsync` is a single conditional update, `UPDATE wallets SET balance = balance + amount WHERE id = … AND balance + amount >= 0`, plus `CHECK (balance >= 0)`. The check and the change are one statement, so only one purchase can win (tested now: 20 racing ৳100 debits on ৳1000 → exactly 10 succeed).
 - 🔐 Gate taps lock rows in one fixed order (ticket → journey → account), so two gates can't deadlock. Background jobs use `FOR UPDATE SKIP LOCKED`, so several workers never take the same row.
 - 🧪 It will be proved the same way: 200 parallel purchases against real PostgreSQL.
 
@@ -463,6 +507,7 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - 🎫 **Tokens:** ES256 (ECDSA P-256). Only Identity holds the private key. Others get the public key from `/.well-known/jwks.json`, so a compromised service can verify tokens but never mint them. Tokens last 15 minutes, because a JWT can't be recalled once issued. The `kid` lets keys rotate without breaking tokens already issued.
 - 🚪 **Login hardening:** one uniform `401` with equal timing for unknown phones and wrong passwords, plus 5 attempts per minute per phone on top of the gateway's per-IP limit.
 - 🛂 **Zero trust between services:** the gateway does not verify tokens and doesn't need to be trusted. Each service verifies every request itself, so a call that skips the gateway (from inside the network) is checked just the same.
+- 🧾 **Payment webhooks:** HMAC-SHA256 with a shared secret from `.env`, constant-time comparison, a 5-minute replay window with the timestamp inside the MAC, a 64 KB body cap, and the body is not parsed until the signature is valid. Money is credited only by this webhook, never by the client.
 - 🧾 **Identity comes from the token only:** endpoints read the user from `sub`, so `/wallet/me` can't be pointed at someone else's wallet.
 
 ## 📌 Key decisions and trade-offs
@@ -487,7 +532,8 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 
 - 🔐 **No refresh token yet,** so after 15 minutes the user logs in again. A token can't be revoked before it expires (no deny-list yet).
 - 🔒 **The per-phone login limit is in memory,** so it's per Identity instance and resets on restart (Redis is in the bonus list). Someone can also keep one phone's login blocked for a minute by failing on purpose: that trade buys protection from password guessing.
-- 💳 **No way to add money yet.** The wallet and ledger exist, but top-ups arrive in Phase 8, so a new wallet stays at ৳0.
+- 💳 **The payment provider is simulated** (`deploy/fake-payment.sh`). A real one (bKash, SSLCommerz) needs its own signature format and a sandbox account; the inbox, state machine and ledger stay the same.
+- ⏳ **No reconciliation job yet.** A top-up whose webhook never arrives stays `Pending`; a real system asks the provider about old pending top-ups and expires them.
 - 📒 **Single-sided ledger.** Each movement is one row on the user's wallet. Full double-entry (a matching row on a system account, so every transaction sums to zero) is not modelled yet.
 - 🎫 **No tickets or gates yet.**
 - 📱 **Bangladeshi mobile numbers only,** and phones are not verified (no OTP yet).
@@ -510,8 +556,8 @@ Each phase is one small pull request with its own tests.
 | 5 | Login: ES256 JWT and a JWKS endpoint | ✅ #11 |
 | 6 | Protected endpoints across services (401 / 403) | ✅ #12 |
 | 7 | Wallet and append-only ledger, history with cursor pagination | ✅ #13 |
-| 8 | Top-up through an HMAC-signed payment webhook, an inbox for duplicates | ⏳ next |
-| 9 | Ticket purchase: `Idempotency-Key`, atomic debit, a 200-way concurrency test | |
+| 8 | Top-up through an HMAC-signed payment webhook, an inbox for duplicates | ✅ #14 |
+| 9 | Ticket purchase: `Idempotency-Key`, atomic debit, a 200-way concurrency test | ⏳ next |
 | 10 | Ticket list and cancel with refund (ledger reversal) | |
 | 11 | Signed QR credential (JWS) | |
 | 12 | Gate entry and exit: a journey state machine, row locks in a fixed order | |

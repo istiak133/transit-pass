@@ -31,5 +31,10 @@ internal sealed class LedgerEntryConfiguration : IEntityTypeConfiguration<Ledger
         // Composite (wallet_id, id): "this wallet's entries, newest first, after cursor X" is one index range
         // scan, O(log n + page). It also serves the FK, so no separate wallet_id index is needed.
         builder.HasIndex(e => new { e.WalletId, e.Id }).HasDatabaseName("ix_ledger_entries_wallet_id_id");
+
+        // Partial UNIQUE index: at most one TopUp entry per top-up id. The third guard against a double
+        // credit (after the inbox and the state machine). Only TopUp rows are in this index at all.
+        builder.HasIndex(e => e.RefId).IsUnique().HasFilter("type = 'TopUp'")
+            .HasDatabaseName("ux_ledger_entries_topup_ref");
     }
 }

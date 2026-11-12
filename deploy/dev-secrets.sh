@@ -22,6 +22,7 @@ add POSTGRES_SUPERUSER_PASSWORD "$(pw)"
 add IDENTITY_DB_PASSWORD "$(pw)"
 add NETWORK_DB_PASSWORD "$(pw)"
 add CORE_DB_PASSWORD "$(pw)"
+add PAYMENT_WEBHOOK_SECRET "$(openssl rand -hex 32)" # shared with the (fake) payment provider for HMAC
 
 # ES256 signing key for Identity (EC P-256, PKCS#8 PEM). Stored on one line with \n escapes,
 # which Compose turns back into newlines inside double quotes.

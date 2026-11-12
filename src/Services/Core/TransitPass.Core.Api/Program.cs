@@ -1,18 +1,22 @@
 using TransitPass.BuildingBlocks.Auth;
 using TransitPass.BuildingBlocks.Hosting;
 using TransitPass.Core.Api.Data;
+using TransitPass.Core.Api.Payments;
+using TransitPass.Core.Api.Topups;
 using TransitPass.Core.Api.Wallets;
 
 // Transit Core service: Wallet, Ticketing and Gate. They live in one service because buying a ticket and
 // exiting a gate must debit the wallet and change the ticket in ONE database transaction (ADR 0019).
 // It owns its own database (core_db) and nothing else reads it.
-// Endpoints live under /api/v1/wallet, /api/v1/tickets and /api/v1/gate, which are also its gateway routes.
+// Endpoints live under /api/v1/wallet, /api/v1/payments, /api/v1/tickets and /api/v1/gate, which are also its gateway routes.
 var builder = WebApplication.CreateBuilder(args);
 
 builder.AddServiceDefaults();
 builder.AddPostgres();
 builder.AddCoreDatabase();
 builder.AddJwtAuthentication(); // trust Identity's tokens, verified locally with its public keys
+builder.Services.Configure<PaymentOptions>(builder.Configuration.GetSection(PaymentOptions.Section));
+builder.Services.AddSingleton<WebhookSecret>();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
@@ -27,6 +31,10 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapWalletEndpoints();
+app.MapTopupEndpoints();
+app.MapPaymentWebhook(); // anonymous: authenticated by its HMAC signature
+
+_ = app.Services.GetRequiredService<WebhookSecret>(); // fail fast at startup if the secret is missing
 
 await app.MigrateIfEnabledAsync();
 

@@ -10,6 +10,7 @@ public sealed class GatewayRoutingTests
     [InlineData("/api/v1/identity/users/me", "identity.test")]
     [InlineData("/api/v1/network/stations?limit=5", "network.test")]
     [InlineData("/api/v1/wallet/balance", "core.test")]
+    [InlineData("/api/v1/payments/webhook", "core.test")]
     [InlineData("/api/v1/tickets/abc", "core.test")]
     [InlineData("/api/v1/gate/taps", "core.test")]
     public async Task Route_forwards_to_the_owning_service_with_path_and_query_intact(string path, string expectedHost)
