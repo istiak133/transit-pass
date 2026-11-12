@@ -6,6 +6,7 @@
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Npgsql" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="TransitPass.BuildingBlocks.Tests" />

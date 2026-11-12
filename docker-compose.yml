@@ -68,6 +68,9 @@ services:
     environment:
       <<: *service-env
       ConnectionStrings__Default: Host=postgres;Database=core_db;Username=core_svc;Password=${CORE_DB_PASSWORD}
+      # Core verifies tokens with Identity's public keys, fetched over the private Compose network.
+      Jwt__JwksUrl: http://identity:8080/.well-known/jwks.json
+      Jwt__RequireHttps: "false"
 
   gateway:
     restart: unless-stopped

@@ -11,10 +11,12 @@
     <Project Path="src/Services/Network/TransitPass.Network.Api/TransitPass.Network.Api.csproj" />
     <Project Path="src/Services/Core/TransitPass.Core.Api/TransitPass.Core.Api.csproj" />
   </Folder>
+  <Folder Name="/src/Services/Core/" />
   <Folder Name="/src/Services/Identity/" />
   <Folder Name="/src/Services/Network/" />
   <Folder Name="/tests/">
     <Project Path="tests/TransitPass.BuildingBlocks.Tests/TransitPass.BuildingBlocks.Tests.csproj" />
+    <Project Path="tests/TransitPass.Core.Tests/TransitPass.Core.Tests.csproj" />
     <Project Path="tests/TransitPass.Gateway.Tests/TransitPass.Gateway.Tests.csproj" />
     <Project Path="tests/TransitPass.Identity.Tests/TransitPass.Identity.Tests.csproj" />
     <Project Path="tests/TransitPass.Network.Tests/TransitPass.Network.Tests.csproj" />

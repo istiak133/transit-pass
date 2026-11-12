@@ -24,6 +24,20 @@ public sealed class GatewayRoutingTests
     }
 
     [Fact]
+    public async Task Authorization_header_reaches_the_service_unchanged()
+    {
+        // The gateway doesn't verify tokens; each service does. So it must pass the bearer token through.
+        using var factory = new GatewayFactory();
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/wallet/me");
+        request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "abc.def.ghi");
+
+        (await client.SendAsync(request, TestContext.Current.CancellationToken)).StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        factory.Forwarded.Single().Headers.Authorization!.ToString().ShouldBe("Bearer abc.def.ghi");
+    }
+
+    [Fact]
     public async Task Unknown_path_is_a_problem_404_and_is_not_forwarded()
     {
         using var factory = new GatewayFactory();
