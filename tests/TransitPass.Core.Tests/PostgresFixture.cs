@@ -12,7 +12,11 @@ namespace TransitPass.Core.Tests;
 /// </summary>
 public sealed class PostgresFixture : IAsyncLifetime
 {
-    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17-alpine").Build();
+    // Every factory has its own pool (up to 100 connections), and test classes run in parallel; the
+    // 200-purchase race alone can fill one pool. Postgres's default of 100 connections is too few for that.
+    private readonly PostgreSqlContainer _postgres = new PostgreSqlBuilder("postgres:17-alpine")
+        .WithCommand("-c", "max_connections=400")
+        .Build();
 
     public string ConnectionString => _postgres.GetConnectionString();
 

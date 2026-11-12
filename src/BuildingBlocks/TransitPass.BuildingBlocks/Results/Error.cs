@@ -20,6 +20,9 @@ public enum ErrorType
 
     /// <summary>The request is well formed but breaks a business rule, for example insufficient funds (422).</summary>
     BusinessRule,
+
+    /// <summary>A service we depend on is down or too slow; the caller may retry later (503).</summary>
+    Unavailable,
 }
 
 /// <summary>
@@ -46,4 +49,7 @@ public sealed record Error(string Code, string Message, ErrorType Type)
 
     /// <summary>Creates a business-rule error.</summary>
     public static Error BusinessRule(string code, string message) => new(code, message, ErrorType.BusinessRule);
+
+    /// <summary>A dependency failed (503).</summary>
+    public static Error Unavailable(string code, string message) => new(code, message, ErrorType.Unavailable);
 }

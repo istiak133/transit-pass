@@ -1,7 +1,9 @@
 using TransitPass.BuildingBlocks.Auth;
 using TransitPass.BuildingBlocks.Hosting;
 using TransitPass.Core.Api.Data;
+using TransitPass.Core.Api.Fares;
 using TransitPass.Core.Api.Payments;
+using TransitPass.Core.Api.Tickets;
 using TransitPass.Core.Api.Topups;
 using TransitPass.Core.Api.Wallets;
 
@@ -17,6 +19,13 @@ builder.AddCoreDatabase();
 builder.AddJwtAuthentication(); // trust Identity's tokens, verified locally with its public keys
 builder.Services.Configure<PaymentOptions>(builder.Configuration.GetSection(PaymentOptions.Section));
 builder.Services.AddSingleton<WebhookSecret>();
+
+// Core → Network over HTTP for fares. Short timeout: a purchase should fail fast with 503, not hang.
+builder.Services.AddHttpClient<IFareQuotes, NetworkFareClient>(http =>
+{
+    http.BaseAddress = new Uri(builder.Configuration[NetworkFareClient.NetworkUrlKey] ?? "http://localhost:5102/");
+    http.Timeout = NetworkFareClient.Timeout;
+});
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
@@ -33,6 +42,7 @@ if (app.Environment.IsDevelopment())
 app.MapWalletEndpoints();
 app.MapTopupEndpoints();
 app.MapPaymentWebhook(); // anonymous: authenticated by its HMAC signature
+app.MapTicketEndpoints();
 
 _ = app.Services.GetRequiredService<WebhookSecret>(); // fail fast at startup if the secret is missing
 

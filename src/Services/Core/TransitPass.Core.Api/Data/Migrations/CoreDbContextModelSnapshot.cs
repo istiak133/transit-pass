@@ -22,6 +22,45 @@ namespace TransitPass.Core.Api.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("TransitPass.Core.Api.Idempotency.IdempotencyRecord", b =>
+                {
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<string>("Key")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("key");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("request_hash")
+                        .IsFixedLength();
+
+                    b.Property<string>("ResponseBody")
+                        .HasColumnType("text")
+                        .HasColumnName("response_body");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("ticket_id");
+
+                    b.HasKey("UserId", "Key")
+                        .HasName("pk_idempotency_keys");
+
+                    b.ToTable("idempotency_keys", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_idempotency_keys_response_complete", "(ticket_id IS NULL) = (response_body IS NULL)");
+                        });
+                });
+
             modelBuilder.Entity("TransitPass.Core.Api.Ledger.LedgerEntry", b =>
                 {
                     b.Property<Guid>("Id")
@@ -99,6 +138,72 @@ namespace TransitPass.Core.Api.Data.Migrations
                         .HasName("pk_payment_events");
 
                     b.ToTable("payment_events", (string)null);
+                });
+
+            modelBuilder.Entity("TransitPass.Core.Api.Tickets.Ticket", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<long>("DistanceM")
+                        .HasColumnType("bigint")
+                        .HasColumnName("distance_m");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<long>("FarePoisha")
+                        .HasColumnType("bigint")
+                        .HasColumnName("fare_poisha");
+
+                    b.Property<string>("FromStation")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("from_station");
+
+                    b.Property<DateTimeOffset>("PurchasedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("purchased_at");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("status");
+
+                    b.Property<string>("ToStation")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("to_station");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_tickets");
+
+                    b.HasIndex("ExpiresAt")
+                        .HasDatabaseName("ix_tickets_active_expiry")
+                        .HasFilter("status = 'Active'");
+
+                    b.HasIndex("UserId", "Id")
+                        .HasDatabaseName("ix_tickets_user_id_id");
+
+                    b.ToTable("tickets", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_tickets_different_stations", "to_station <> from_station");
+
+                            t.HasCheckConstraint("ck_tickets_expiry_after_purchase", "expires_at > purchased_at");
+
+                            t.HasCheckConstraint("ck_tickets_fare_positive", "fare_poisha > 0");
+
+                            t.HasCheckConstraint("ck_tickets_status", "status IN ('Active', 'InJourney', 'Used', 'Cancelled', 'Expired')");
+                        });
                 });
 
             modelBuilder.Entity("TransitPass.Core.Api.Topups.Topup", b =>

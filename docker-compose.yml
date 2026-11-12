@@ -73,6 +73,8 @@ services:
       Jwt__RequireHttps: "false"
       # HMAC secret shared with the payment provider (deploy/fake-payment.sh signs with the same one).
       Payments__WebhookSecret: ${PAYMENT_WEBHOOK_SECRET:?run ./deploy/dev-secrets.sh first}
+      # Fares come from the Network service, straight over the private network (not via the gateway).
+      Services__NetworkUrl: http://network:8080/
 
   gateway:
     restart: unless-stopped
