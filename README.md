@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-288%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-290%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -425,7 +425,7 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | The database refuses a second `Refund` row for one ticket, and the failed posting rolls back its balance change | `TicketLifecycleTests.cs` |
 | Ticket list pages newest first with no gaps or repeats, shows only the caller's tickets; empty page; bad cursor `400`; no token `401` | `TicketLifecycleTests.cs` |
 | A ticket's QR credential verifies with only the public key; claims `tid`, `sub`, `from`, `to`, `iat`, `exp` (= ticket expiry) and header `typ`, `kid` are exactly as designed | `tests/TransitPass.Core.Tests/TicketCredentialVerifierTests.cs` |
-| Rejected: a changed payload, a changed or missing signature, another key (even with our `kid`), `alg: none`, HS256 with the public key as the secret, a login token (even signed with the QR key), wrong `typ` / issuer / audience, no `exp`, a future `nbf`, a bad `tid`, garbage and oversized input | `TicketCredentialVerifierTests.cs` |
+| Rejected: a changed payload, a changed or missing signature, another key (even with our `kid`), our own key with a missing or unknown `kid`, a public key embedded in the header (`jwk`/`jku`), `alg: none`, HS256 with the public key as the secret, a login token (even signed with the QR key), wrong `typ` / issuer / audience, no `exp`, a future `nbf`, a bad `tid`, garbage and oversized input | `TicketCredentialVerifierTests.cs` |
 | Expiry with 30 s of clock skew (`credential.expired`); rotation: old QR codes verify through a retired public key by `kid`, and stop once it is dropped; a gate verifies with nothing but the JWKS document | `TicketCredentialVerifierTests.cs` |
 | `GET /tickets/{id}/credential`: owner `200` + `no-store`; someone else's or unknown → `404`; no token `401`; `Cancelled`/`Used`/`Expired` → `409 ticket.not_usable`; past its day → `409 ticket.expired`; `InJourney` → `200`; moves no money | `tests/TransitPass.Core.Tests/TicketCredentialEndpointTests.cs` |
 | ⭐ 50 parallel credential requests all verify; 10 cancels racing 20 credential requests → one refund, each credential request `200` or `409`, and a cancelled ticket's old QR still verifies (so the gate must check the database) | `TicketCredentialEndpointTests.cs` |

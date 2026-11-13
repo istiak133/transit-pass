@@ -185,6 +185,44 @@ public sealed class TicketCredentialVerifierTests : IDisposable
         await ShouldBeRejected(forged);
     }
 
+    [Fact]
+    public async Task Our_own_signature_without_a_matching_kid_is_rejected()
+    {
+        // Signed by the REAL key, but the kid is missing or unknown: the verifier never "tries every key".
+        string genuine = _issuer.Issue(NewTicket(), Now);
+        using var ec = ECDsa.Create(_keys.Signing.SecurityKey.ECDsa.ExportParameters(true));
+        (await _verifier.VerifyAsync(SignRaw(Part(genuine, 0), Part(genuine, 1), ec))).IsSuccess.ShouldBeTrue(); // control
+
+        JsonObject noKid = Part(genuine, 0);
+        noKid.Remove("kid");
+        await ShouldBeRejected(SignRaw(noKid, Part(genuine, 1), ec));
+
+        JsonObject unknownKid = Part(genuine, 0);
+        unknownKid["kid"] = "some-other-key";
+        await ShouldBeRejected(SignRaw(unknownKid, Part(genuine, 1), ec));
+    }
+
+    [Fact]
+    public async Task A_public_key_embedded_in_the_header_is_never_trusted()
+    {
+        // RFC 7515 lets a header carry "jwk"/"jku". A verifier that trusted them would let anyone sign with their
+        // own key. Only keys handed to the verifier (our JWKS) count.
+        string genuine = _issuer.Issue(NewTicket(), Now);
+        ECDsa attackerKey = NewEc();
+        ECParameters p = attackerKey.ExportParameters(false);
+        JsonObject header = Part(genuine, 0);
+        header["jwk"] = new JsonObject
+        {
+            ["kty"] = "EC",
+            ["crv"] = "P-256",
+            ["x"] = Base64UrlEncoder.Encode(p.Q.X),
+            ["y"] = Base64UrlEncoder.Encode(p.Q.Y),
+        };
+        header["jku"] = "https://attacker.example/jwks.json";
+
+        await ShouldBeRejected(SignRaw(header, Part(genuine, 1), attackerKey));
+    }
+
     // ---------- algorithm confusion ----------
 
     [Fact]
