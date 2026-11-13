@@ -27,6 +27,9 @@ public sealed class GatewayFactory : WebApplicationFactory<Program>
     /// <summary>Every request the gateway forwarded, in order.</summary>
     public ConcurrentQueue<HttpRequestMessage> Forwarded { get; } = new();
 
+    /// <summary>The body of every forwarded request that had one, in order (read as the stub receives it).</summary>
+    public ConcurrentQueue<string> ForwardedBodies { get; } = new();
+
     /// <summary>Overrides a setting before the host starts.</summary>
     public GatewayFactory With(string key, string value)
     {
@@ -39,20 +42,27 @@ public sealed class GatewayFactory : WebApplicationFactory<Program>
         builder.UseEnvironment("Testing");
         builder.ConfigureAppConfiguration(config => config.AddInMemoryCollection(_settings));
         builder.ConfigureTestServices(services =>
-            services.AddSingleton<IForwarderHttpClientFactory>(new StubClientFactory(Forwarded)));
+            services.AddSingleton<IForwarderHttpClientFactory>(new StubClientFactory(Forwarded, ForwardedBodies)));
     }
 
-    private sealed class StubClientFactory(ConcurrentQueue<HttpRequestMessage> log) : IForwarderHttpClientFactory
+    private sealed class StubClientFactory(ConcurrentQueue<HttpRequestMessage> log, ConcurrentQueue<string> bodies)
+        : IForwarderHttpClientFactory
     {
-        public HttpMessageInvoker CreateClient(ForwarderHttpClientContext context) => new(new StubHandler(log));
+        public HttpMessageInvoker CreateClient(ForwarderHttpClientContext context) => new(new StubHandler(log, bodies));
     }
 
-    private sealed class StubHandler(ConcurrentQueue<HttpRequestMessage> log) : HttpMessageHandler
+    private sealed class StubHandler(ConcurrentQueue<HttpRequestMessage> log, ConcurrentQueue<string> bodies) : HttpMessageHandler
     {
-        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             log.Enqueue(request);
-            return Task.FromResult(EchoTarget(request));
+            if (request.Content is not null)
+            {
+                // YARP streams the body from the client; read it here, as the real service would.
+                bodies.Enqueue(await request.Content.ReadAsStringAsync(cancellationToken));
+            }
+
+            return EchoTarget(request);
         }
 
         // The caller (YARP's HttpMessageInvoker) owns and disposes the response.

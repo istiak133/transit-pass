@@ -46,6 +46,9 @@ public sealed class GateDevices
     internal const int MaxIdLength = 64;
     internal const int MaxKeyLength = 256;
 
+    // SHA-256("") in hex: an enrollment with this hash has no key.
+    private static readonly string EmptyKeyHash = HashKey(string.Empty);
+
     private readonly FrozenDictionary<string, (GateDevice Device, byte[] KeyHash)> _byId;
 
     // Compared against when the gate id is unknown, so an unknown gate costs the same work as a wrong key.
@@ -54,6 +57,11 @@ public sealed class GateDevices
     public GateDevices(IOptions<GateOptions> options)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (options.Value.ExitGracePeriod < TimeSpan.Zero)
+        {
+            throw new InvalidOperationException("Gate:ExitGracePeriod must not be negative.");
+        }
+
         Dictionary<string, (GateDevice, byte[])> devices = new(StringComparer.Ordinal);
         for (int i = 0; i < options.Value.Devices.Count; i++)
         {
@@ -74,6 +82,13 @@ public sealed class GateDevices
                 throw new InvalidOperationException($"{where}:KeySha256 must be 64 hex characters (the SHA-256 of the gate's key).");
             }
 
+            // The SHA-256 of "" means the key was empty when it was hashed (a blank .env line, say). Such a gate
+            // would have no secret at all, so refuse to start rather than enrol it.
+            if (string.Equals(d.KeySha256, EmptyKeyHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"{where}:KeySha256 is the hash of an empty key. Give the gate a real random key.");
+            }
+
             if (!devices.TryAdd(d.Id, (new GateDevice(d.Id, d.Station), Convert.FromHexString(d.KeySha256))))
             {
                 throw new InvalidOperationException($"{where}:Id '{d.Id}' is enrolled twice.");
@@ -91,11 +106,14 @@ public sealed class GateDevices
     /// </summary>
     public GateDevice? Authenticate(string? gateId, string? key)
     {
-        byte[] given = SHA256.HashData(Encoding.UTF8.GetBytes(key is { Length: <= MaxKeyLength } ? key : string.Empty));
+        // A missing, empty or oversized key is refused outright. (It still costs one hash, of "", so the time
+        // taken doesn't depend on which of these it was; and it can never match: empty-key hashes can't be enrolled.)
+        bool usable = key is { Length: > 0 and <= MaxKeyLength };
+        byte[] given = SHA256.HashData(Encoding.UTF8.GetBytes(usable ? key! : string.Empty));
         (GateDevice Device, byte[] KeyHash) entry = default;
         bool known = gateId is not null && _byId.TryGetValue(gateId, out entry);
         bool match = CryptographicOperations.FixedTimeEquals(given, known ? entry.KeyHash : _dummyHash);
-        return known && match && !string.IsNullOrEmpty(key) ? entry.Device : null;
+        return usable && known && match ? entry.Device : null;
     }
 
     /// <summary>The hex SHA-256 to configure for a key (what deploy/dev-secrets.sh computes with openssl).</summary>

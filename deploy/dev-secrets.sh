@@ -44,6 +44,7 @@ for station in uttara-north agargaon karwan-bazar motijheel; do
   name=$(printf '%s' "$station" | tr 'a-z-' 'A-Z_')
   add "GATE_${name}_KEY" "$(openssl rand -hex 32)"
   key=$(grep "^GATE_${name}_KEY=" .env | cut -d= -f2-)
+  [ -n "$key" ] || { echo "GATE_${name}_KEY is empty in .env: delete that line and re-run" >&2; exit 1; }
   add "GATE_${name}_KEY_SHA256" "$(printf '%s' "$key" | openssl dgst -sha256 -r | cut -d' ' -f1)"
 done
 

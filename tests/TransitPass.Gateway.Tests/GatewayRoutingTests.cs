@@ -58,6 +58,7 @@ public sealed class GatewayRoutingTests
         forwarded.Method.ShouldBe(HttpMethod.Post);
         forwarded.RequestUri!.Host.ShouldBe("core.test");
         forwarded.Headers.GetValues("X-Gate-Key").ShouldBe(["k-123"]);
+        factory.ForwardedBodies.Single().ShouldBe("{\"tapId\":\"t-1\",\"direction\":\"entry\"}");
     }
 
     [Fact]

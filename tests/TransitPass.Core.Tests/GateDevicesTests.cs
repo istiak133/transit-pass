@@ -98,4 +98,30 @@ public sealed class GateDevicesTests
         Should.Throw<InvalidOperationException>(() => Enrol(Device(), Device(station: "agargaon")))
             .Message.ShouldContain("enrolled twice");
     }
+
+    [Fact]
+    public void A_gate_enrolled_with_the_hash_of_an_empty_key_fails_at_startup()
+    {
+        // A blank GATE_..._KEY in .env hashes to SHA-256(""). Before this check, such a gate accepted any key longer
+        // than MaxKeyLength (an oversized key was hashed as ""), so it must never be enrolled.
+        var device = new GateDeviceOptions { Id = "gate-1", Station = "motijheel", KeySha256 = GateDevices.HashKey(string.Empty).ToUpperInvariant() };
+        Should.Throw<InvalidOperationException>(() => Enrol(device)).Message.ShouldContain("empty key");
+    }
+
+    [Fact]
+    public void A_negative_exit_grace_fails_at_startup()
+    {
+        var options = new GateOptions { Devices = [Device()], ExitGracePeriod = TimeSpan.FromMinutes(-1) };
+        Should.Throw<InvalidOperationException>(() => new GateDevices(Options.Create(options))).Message.ShouldContain("ExitGracePeriod");
+    }
+
+    [Fact]
+    public void A_key_one_character_too_long_is_refused_even_if_it_starts_with_the_real_key()
+    {
+        string longKey = Key + new string('0', GateDevices.MaxKeyLength - Key.Length + 1);
+        GateDevices gates = Enrol(Device(key: longKey[..GateDevices.MaxKeyLength]), Device("gate-2", "agargaon", longKey));
+
+        gates.Authenticate("gate-1", longKey[..GateDevices.MaxKeyLength])!.Id.ShouldBe("gate-1"); // exactly the limit: fine
+        gates.Authenticate("gate-2", longKey).ShouldBeNull(); // one over: refused, even with the enrolled key
+    }
 }
