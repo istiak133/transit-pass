@@ -13,26 +13,53 @@ public interface IFareQuotes
     Task<Result<FareQuote>> QuoteAsync(string from, string to, CancellationToken ct);
 }
 
+/// <summary>Asks the Network service whether a station exists. The gate checks its own station before an entry.</summary>
+public interface IStationDirectory
+{
+    /// <summary>Success if the station exists; <c>404 station.not_found</c>, or <c>503 network.unavailable</c>.</summary>
+    Task<Result> EnsureExistsAsync(string stationId, CancellationToken ct);
+}
+
 /// <summary>
-/// HTTP client for Network's <c>GET /api/v1/network/fares/quote</c>. Network's own answers (unknown station,
+/// HTTP client for Network's <c>GET /api/v1/network/fares/quote</c> and <c>GET /api/v1/network/stations/{id}</c>. Network's own answers (unknown station,
 /// same station, no route) pass through with their codes. Anything else (down, 5xx, timeout, garbage)
 /// becomes <c>503 network.unavailable</c>, so a Network problem never looks like the user's mistake.
 /// </summary>
-internal sealed class NetworkFareClient(HttpClient http, ILogger<NetworkFareClient> logger) : IFareQuotes
+internal sealed class NetworkFareClient(HttpClient http, ILogger<NetworkFareClient> logger) : IFareQuotes, IStationDirectory
 {
     internal const string NetworkUrlKey = "Services:NetworkUrl";
     internal static readonly TimeSpan Timeout = TimeSpan.FromSeconds(3);
 
-    public async Task<Result<FareQuote>> QuoteAsync(string from, string to, CancellationToken ct)
+    public Task<Result<FareQuote>> QuoteAsync(string from, string to, CancellationToken ct) =>
+        GetAsync<FareQuote>(
+            $"api/v1/network/fares/quote?from={Uri.EscapeDataString(from)}&to={Uri.EscapeDataString(to)}",
+            quote => quote is { FarePoisha: > 0 }, "Network returned an unusable fare.", ct);
+
+    public async Task<Result> EnsureExistsAsync(string stationId, CancellationToken ct)
     {
-        string url = $"api/v1/network/fares/quote?from={Uri.EscapeDataString(from)}&to={Uri.EscapeDataString(to)}";
+        var station = await GetAsync<StationInfo>(
+            $"api/v1/network/stations/{Uri.EscapeDataString(stationId)}",
+            s => s is { Id.Length: > 0 }, "Network returned an unusable station.", ct);
+        return station.IsSuccess ? Result.Success() : station.Error;
+    }
+
+    /// <summary>The station fields Core needs (Network's response has more).</summary>
+    private sealed record StationInfo(string Id);
+
+    /// <summary>
+    /// One GET with the shared mapping: 2xx and <paramref name="usable"/> → the value; Network's own 400/404/422
+    /// pass through with their codes; anything else → 503.
+    /// </summary>
+    private async Task<Result<T>> GetAsync<T>(string url, Func<T?, bool> usable, string unusable, CancellationToken ct)
+        where T : class
+    {
         try
         {
-            using HttpResponseMessage response = await http.GetAsync(url, ct);
+            using HttpResponseMessage response = await http.GetAsync(new Uri(url, UriKind.Relative), ct);
             if (response.IsSuccessStatusCode)
             {
-                FareQuote? quote = await response.Content.ReadFromJsonAsync<FareQuote>(ct);
-                return quote is { FarePoisha: > 0 } ? quote : Unavailable("Network returned an unusable fare.");
+                T? value = await response.Content.ReadFromJsonAsync<T>(ct);
+                return usable(value) ? value! : Unavailable(unusable);
             }
 
             ErrorType? passThrough = (int)response.StatusCode switch
@@ -66,7 +93,7 @@ internal sealed class NetworkFareClient(HttpClient http, ILogger<NetworkFareClie
 
     private Error Unavailable(string why)
     {
-        logger.LogWarning("Fare quote failed: {Reason}", why);
+        logger.LogWarning("Network call failed: {Reason}", why);
         return Error.Unavailable("network.unavailable", "Fares are unavailable right now. Please try again.");
     }
 }

@@ -41,6 +41,26 @@ public sealed class GatewayRoutingTests
     }
 
     [Fact]
+    public async Task A_gate_tap_reaches_core_with_its_gate_key_and_body_unchanged()
+    {
+        // Gates authenticate to Core with X-Gate-Key; the gateway must forward it (and the POST body) as is.
+        using var factory = new GatewayFactory();
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/gate/taps")
+        {
+            Content = JsonContent.Create(new { tapId = "t-1", direction = "entry" }),
+        };
+        request.Headers.Add("X-Gate-Key", "k-123");
+
+        (await client.SendAsync(request, TestContext.Current.CancellationToken)).StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        HttpRequestMessage forwarded = factory.Forwarded.Single();
+        forwarded.Method.ShouldBe(HttpMethod.Post);
+        forwarded.RequestUri!.Host.ShouldBe("core.test");
+        forwarded.Headers.GetValues("X-Gate-Key").ShouldBe(["k-123"]);
+    }
+
+    [Fact]
     public async Task Unknown_path_is_a_problem_404_and_is_not_forwarded()
     {
         using var factory = new GatewayFactory();

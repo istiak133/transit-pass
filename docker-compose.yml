@@ -78,6 +78,19 @@ services:
       Qr__SigningKeyPem: ${QR_SIGNING_KEY_PEM:?run ./deploy/dev-secrets.sh first}
       # Fares come from the Network service, straight over the private network (not via the gateway).
       Services__NetworkUrl: http://network:8080/
+      # Enrolled gate devices: id, station, and only the SHA-256 of each gate's key (the keys stay with the gates).
+      Gate__Devices__0__Id: gate-uttara-north-1
+      Gate__Devices__0__Station: uttara-north
+      Gate__Devices__0__KeySha256: ${GATE_UTTARA_NORTH_KEY_SHA256:?run ./deploy/dev-secrets.sh first}
+      Gate__Devices__1__Id: gate-agargaon-1
+      Gate__Devices__1__Station: agargaon
+      Gate__Devices__1__KeySha256: ${GATE_AGARGAON_KEY_SHA256:?run ./deploy/dev-secrets.sh first}
+      Gate__Devices__2__Id: gate-karwan-bazar-1
+      Gate__Devices__2__Station: karwan-bazar
+      Gate__Devices__2__KeySha256: ${GATE_KARWAN_BAZAR_KEY_SHA256:?run ./deploy/dev-secrets.sh first}
+      Gate__Devices__3__Id: gate-motijheel-1
+      Gate__Devices__3__Station: motijheel
+      Gate__Devices__3__KeySha256: ${GATE_MOTIJHEEL_KEY_SHA256:?run ./deploy/dev-secrets.sh first}
 
   gateway:
     restart: unless-stopped

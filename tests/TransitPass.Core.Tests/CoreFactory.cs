@@ -27,6 +27,13 @@ public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Prog
     /// <summary>This factory's payment webhook secret: random, so no secret is ever written in the repo.</summary>
     public string WebhookSecret { get; } = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
 
+    /// <summary>The stations with an enrolled gate in tests; the gate at station s is "gate-s".</summary>
+    public static readonly string[] GateStations = ["uttara-north", "agargaon", "karwan-bazar", "motijheel"];
+
+    /// <summary>Each test gate's key: random per factory, so no gate key is ever written in the repo.</summary>
+    public Dictionary<string, string> GateKeys { get; } =
+        GateStations.ToDictionary(s => $"gate-{s}", _ => Convert.ToHexString(RandomNumberGenerator.GetBytes(32)));
+
     /// <summary>A client that sends a valid token for <paramref name="userId"/> on every request.</summary>
     public HttpClient ClientFor(Guid userId)
     {
@@ -50,6 +57,14 @@ public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Prog
         builder.UseSetting("Jwt:RequireHttps", "false");
         builder.UseSetting("Jwt:KeyRefreshMinInterval", "00:00:01"); // the library's minimum
         builder.UseSetting("Payments:WebhookSecret", WebhookSecret);
+        for (int i = 0; i < GateStations.Length; i++)
+        {
+            // Enrolled the way production is: id, station and only the SHA-256 of the key.
+            builder.UseSetting($"Gate:Devices:{i}:Id", $"gate-{GateStations[i]}");
+            builder.UseSetting($"Gate:Devices:{i}:Station", GateStations[i]);
+            builder.UseSetting($"Gate:Devices:{i}:KeySha256", TransitPass.Core.Api.Gates.GateDevices.HashKey(GateKeys[$"gate-{GateStations[i]}"]));
+        }
+
         builder.ConfigureTestServices(services =>
         {
             services.AddHttpClient(JwtAuthentication.JwksHttpClient).ConfigurePrimaryHttpMessageHandler(() => Identity);

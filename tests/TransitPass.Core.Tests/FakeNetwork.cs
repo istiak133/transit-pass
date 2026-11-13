@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using System.Text.Json;
@@ -16,7 +17,7 @@ public enum NetworkMode
     Timeout,
 }
 
-/// <summary>A stand-in for Network's GET /api/v1/network/fares/quote.</summary>
+/// <summary>A stand-in for Network's GET /api/v1/network/fares/quote and GET /api/v1/network/stations/{id}.</summary>
 public sealed class FakeNetwork : HttpMessageHandler
 {
     private int _calls;
@@ -27,6 +28,12 @@ public sealed class FakeNetwork : HttpMessageHandler
     public long FarePoisha { get; set; } = 100_00;
 
     public int Calls => Volatile.Read(ref _calls);
+
+    /// <summary>Fares for particular trips (from, to); any other trip costs <see cref="FarePoisha"/>.</summary>
+    public ConcurrentDictionary<(string From, string To), long> Fares { get; } = new();
+
+    /// <summary>Stations the fake says don't exist (station lookup and fare quote both answer 404).</summary>
+    public ConcurrentDictionary<string, bool> UnknownStations { get; } = new();
 
     protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -42,11 +49,27 @@ public sealed class FakeNetwork : HttpMessageHandler
     // The caller (HttpClient) owns and disposes the response.
     private HttpResponseMessage Respond(Uri uri)
     {
+        const string StationsPath = "/api/v1/network/stations/";
+        if (uri.AbsolutePath.StartsWith(StationsPath, StringComparison.Ordinal))
+        {
+            string id = Uri.UnescapeDataString(uri.AbsolutePath[StationsPath.Length..]);
+            return Mode switch
+            {
+                NetworkMode.Ok when UnknownStations.ContainsKey(id) =>
+                    Problem(HttpStatusCode.NotFound, "station.not_found", $"Station '{id}' does not exist."),
+                NetworkMode.Ok or NetworkMode.SameStation or NetworkMode.NoRoute => Json(HttpStatusCode.OK, new { id, name = id }),
+                NetworkMode.StationNotFound => Problem(HttpStatusCode.NotFound, "station.not_found", $"Station '{id}' does not exist."),
+                _ => new HttpResponseMessage(HttpStatusCode.InternalServerError),
+            };
+        }
+
         var query = System.Web.HttpUtility.ParseQueryString(uri.Query);
         string from = query["from"]!, to = query["to"]!;
         return Mode switch
         {
-            NetworkMode.Ok => Json(HttpStatusCode.OK, new { from, to, distanceM = 16_500, farePoisha = FarePoisha }),
+            NetworkMode.Ok when UnknownStations.ContainsKey(from) || UnknownStations.ContainsKey(to) =>
+                Problem(HttpStatusCode.NotFound, "station.not_found", "Station does not exist."),
+            NetworkMode.Ok => Json(HttpStatusCode.OK, new { from, to, distanceM = 16_500, farePoisha = Fares.GetValueOrDefault((from, to), FarePoisha) }),
             NetworkMode.StationNotFound => Problem(HttpStatusCode.NotFound, "station.not_found", $"Station '{to}' does not exist."),
             NetworkMode.SameStation => Problem(HttpStatusCode.BadRequest, "fare.same_station", "'from' and 'to' must be different stations."),
             NetworkMode.NoRoute => Problem(HttpStatusCode.UnprocessableEntity, "fare.no_route", "There is no track."),

@@ -82,8 +82,17 @@ public sealed class TicketCredentialVerifier
     }
 
     /// <summary>The claims of a genuine, unexpired credential, or <c>credential.invalid</c> / <c>credential.expired</c>.</summary>
-    public async Task<Result<TicketCredentialClaims>> VerifyAsync(string? credential)
+    public Task<Result<TicketCredentialClaims>> VerifyAsync(string? credential) => VerifyAsync(credential, TimeSpan.Zero);
+
+    /// <summary>
+    /// Like <see cref="VerifyAsync(string?)"/>, but a genuine credential that expired less than
+    /// <paramref name="acceptExpiredFor"/> ago still passes. The gate uses this for EXITS only: Rafi who entered
+    /// at 23:50 must be able to leave at 00:10, after his ticket's service day (and so its QR) has ended.
+    /// The signature is checked exactly as strictly; only the expiry window is wider.
+    /// </summary>
+    public async Task<Result<TicketCredentialClaims>> VerifyAsync(string? credential, TimeSpan acceptExpiredFor)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(acceptExpiredFor, TimeSpan.Zero);
         if (string.IsNullOrWhiteSpace(credential) || credential.Length > MaxLength)
         {
             return Invalid;
@@ -103,7 +112,7 @@ public sealed class TicketCredentialVerifier
             return Invalid;
         }
 
-        if (token.ValidTo <= now - _skew)
+        if (token.ValidTo <= now - _skew - acceptExpiredFor)
         {
             return Expired;
         }
