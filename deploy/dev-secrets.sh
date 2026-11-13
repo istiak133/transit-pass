@@ -38,4 +38,14 @@ if ! grep -q "^QR_SIGNING_KEY_PEM=" .env; then
   add QR_SIGNING_KEY_PEM "\"$key\""
 fi
 
+# One key per gate device (one gate per station locally). The gate keeps the key (deploy/gate-tap.sh reads it);
+# Core is given only its SHA-256, so Core's config holds nothing a thief could tap with.
+for station in uttara-north agargaon karwan-bazar motijheel; do
+  name=$(printf '%s' "$station" | tr 'a-z-' 'A-Z_')
+  add "GATE_${name}_KEY" "$(openssl rand -hex 32)"
+  key=$(grep "^GATE_${name}_KEY=" .env | cut -d= -f2-)
+  [ -n "$key" ] || { echo "GATE_${name}_KEY is empty in .env: delete that line and re-run" >&2; exit 1; }
+  add "GATE_${name}_KEY_SHA256" "$(printf '%s' "$key" | openssl dgst -sha256 -r | cut -d' ' -f1)"
+done
+
 echo ".env is ready."

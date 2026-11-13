@@ -41,5 +41,10 @@ internal sealed class LedgerEntryConfiguration : IEntityTypeConfiguration<Ledger
         // TicketCancellation already makes a second refund impossible; this is the last line of defence.
         builder.HasIndex([nameof(LedgerEntry.RefId)], "ux_ledger_entries_refund_ref").IsUnique().HasFilter("type = 'Refund'")
             .HasDatabaseName("ux_ledger_entries_refund_ref");
+
+        // And for exit surcharges (Phase 12): at most one Surcharge row per ticket. The InJourney → Used guard
+        // already makes a second charge impossible; this is the last line of defence.
+        builder.HasIndex([nameof(LedgerEntry.RefId)], "ux_ledger_entries_surcharge_ref").IsUnique().HasFilter("type = 'Surcharge'")
+            .HasDatabaseName("ux_ledger_entries_surcharge_ref");
     }
 }

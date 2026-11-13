@@ -22,6 +22,142 @@ namespace TransitPass.Core.Api.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("TransitPass.Core.Api.Gates.GateTap", b =>
+                {
+                    b.Property<Guid>("TapId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("tap_id");
+
+                    b.Property<bool>("Allowed")
+                        .HasColumnType("boolean")
+                        .HasColumnName("allowed");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Direction")
+                        .IsRequired()
+                        .HasMaxLength(8)
+                        .HasColumnType("character varying(8)")
+                        .HasColumnName("direction");
+
+                    b.Property<string>("GateId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("gate_id");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character(64)")
+                        .HasColumnName("request_hash")
+                        .IsFixedLength();
+
+                    b.Property<string>("Response")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("response");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("result");
+
+                    b.Property<string>("Station")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("station");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("ticket_id");
+
+                    b.HasKey("TapId")
+                        .HasName("pk_gate_taps");
+
+                    b.HasIndex("TicketId", "CreatedAt")
+                        .HasDatabaseName("ix_gate_taps_ticket_id_created_at");
+
+                    b.ToTable("gate_taps", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_gate_taps_allowed_result", "allowed = (result IN ('gate.entered', 'gate.exited'))");
+
+                            t.HasCheckConstraint("ck_gate_taps_direction", "direction IN ('Entry', 'Exit')");
+                        });
+                });
+
+            modelBuilder.Entity("TransitPass.Core.Api.Gates.Journey", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("EnteredAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("entered_at");
+
+                    b.Property<string>("EntryStation")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("entry_station");
+
+                    b.Property<Guid>("EntryTapId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("entry_tap_id");
+
+                    b.Property<string>("ExitStation")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("exit_station");
+
+                    b.Property<Guid?>("ExitTapId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("exit_tap_id");
+
+                    b.Property<DateTimeOffset?>("ExitedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("exited_at");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("status");
+
+                    b.Property<long?>("SurchargePoisha")
+                        .HasColumnType("bigint")
+                        .HasColumnName("surcharge_poisha");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("ticket_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_journeys");
+
+                    b.HasIndex("TicketId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_journeys_ticket_id");
+
+                    b.ToTable("journeys", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_journeys_completed_has_exit", "(status = 'Completed') = (exited_at IS NOT NULL)");
+
+                            t.HasCheckConstraint("ck_journeys_exit_after_entry", "exited_at >= entered_at");
+
+                            t.HasCheckConstraint("ck_journeys_exit_all_or_nothing", "num_nonnulls(exit_station, exit_tap_id, exited_at, surcharge_poisha) IN (0, 4)");
+
+                            t.HasCheckConstraint("ck_journeys_status", "status IN ('InProgress', 'Completed')");
+
+                            t.HasCheckConstraint("ck_journeys_surcharge_not_negative", "surcharge_poisha >= 0");
+                        });
+                });
+
             modelBuilder.Entity("TransitPass.Core.Api.Idempotency.IdempotencyRecord", b =>
                 {
                     b.Property<Guid>("UserId")
@@ -104,6 +240,11 @@ namespace TransitPass.Core.Api.Data.Migrations
                         .IsUnique()
                         .HasDatabaseName("ux_ledger_entries_refund_ref")
                         .HasFilter("type = 'Refund'");
+
+                    b.HasIndex(new[] { "RefId" }, "ux_ledger_entries_surcharge_ref")
+                        .IsUnique()
+                        .HasDatabaseName("ux_ledger_entries_surcharge_ref")
+                        .HasFilter("type = 'Surcharge'");
 
                     b.ToTable("ledger_entries", null, t =>
                         {
@@ -292,6 +433,26 @@ namespace TransitPass.Core.Api.Data.Migrations
                         {
                             t.HasCheckConstraint("ck_wallets_balance_non_negative", "balance_poisha >= 0");
                         });
+                });
+
+            modelBuilder.Entity("TransitPass.Core.Api.Gates.GateTap", b =>
+                {
+                    b.HasOne("TransitPass.Core.Api.Tickets.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_gate_taps_ticket");
+                });
+
+            modelBuilder.Entity("TransitPass.Core.Api.Gates.Journey", b =>
+                {
+                    b.HasOne("TransitPass.Core.Api.Tickets.Ticket", null)
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_journeys_ticket");
                 });
 
             modelBuilder.Entity("TransitPass.Core.Api.Ledger.LedgerEntry", b =>

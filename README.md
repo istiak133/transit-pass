@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-290%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-352%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -95,6 +95,12 @@ TransitPass started from studying an open-source student metro ticketing project
 - **A login token is never a ticket, and a ticket is never a login:** different key, `typ`, issuer and audience, each enough on its own
 - **Only usable tickets get a QR:** `Active` (to enter) or `InJourney` (to exit) → `200`; `Cancelled`, `Used`, `Expired` → `409 ticket.not_usable`; still `Active` but past its service day → `409 ticket.expired`; someone else's → `404`
 - **Key rotation:** retired public keys (`Qr__RetiredPublicKeyPems__N`) stay in the JWKS and keep verifying old QR codes by `kid` until they expire
+- **Gates:** `POST /api/v1/gate/taps { tapId, gateId, stationId, direction, credential }` is called by **gate devices, not users**. Each gate has its own random key (`X-Gate-Key`); Core is configured with only its **SHA-256**, and the gate's station comes from its enrollment (a gate claiming another station → `403 gate.wrong_station`)
+- **Entry:** verify the QR with public keys → the station exists (Network) → one transaction: guarded `UPDATE tickets SET status = 'InJourney' WHERE status = 'Active' AND expires_at > now`, then a `journeys` row. **Any station** may be the entry; the exit prices the trip actually made
+- **Exit:** fare from the **entry station to the exit station** (Network, outside the transaction). More than the ticket's fare → the difference is charged as a `Surcharge` ledger row; a shorter trip gets no refund. One transaction: ticket `InJourney → Used`, journey `Completed`, wallet debit, always locked in the order **ticket → journey → wallet**
+- **Can't pay the extra → `422 gate.insufficient_funds`**, the gate stays closed and the ticket stays `InJourney`; after a top-up the next tap opens it. Someone inside at midnight can still leave: exits accept a QR up to 3 h past its expiry (`Gate__ExitGracePeriod`)
+- **Every tap is idempotent:** the gate makes a `tapId` per physical tap; the decision (open or refused) is stored in `gate_taps` and a resent `tapId` gets the same answer with `Idempotent-Replayed: true`. The same `tapId` for a different tap → `422 gate.tap_reused`
+- **One QR, one ride:** 20 taps of the same QR at four gates at once → one entry; two exits at once → one exit and one surcharge; entry racing a cancel → exactly one winner. `deploy/gate-tap.sh` plays a gate locally
 
 **🛠️ Engineering**
 - Database-per-service: each service logs in as its own PostgreSQL role, and the others cannot even connect
@@ -162,6 +168,8 @@ erDiagram
     TOPUPS ||--o{ PAYMENT_EVENTS : "is completed by (no FK)"
     TICKETS ||--o{ LEDGER_ENTRIES : "paid by (ref_id, no FK)"
     TICKETS ||--o| IDEMPOTENCY_KEYS : "answer stored in"
+    TICKETS ||--o| JOURNEYS : "rides once"
+    TICKETS ||--o{ GATE_TAPS : "tapped at gates"
     WALLETS {
         uuid id PK "UUIDv7"
         uuid user_id UK "from the token sub, no FK"
@@ -207,9 +215,33 @@ erDiagram
         uuid ticket_id
         text response_body "replayed byte for byte"
     }
+    JOURNEYS {
+        uuid id PK "UUIDv7"
+        uuid ticket_id FK "UNIQUE, ON DELETE RESTRICT"
+        varchar entry_station
+        uuid entry_tap_id
+        timestamptz entered_at
+        varchar exit_station "the 4 exit fields: all NULL or all set"
+        uuid exit_tap_id
+        timestamptz exited_at "CHECK >= entered_at"
+        bigint surcharge_poisha "CHECK >= 0"
+        varchar status "InProgress, Completed"
+    }
+    GATE_TAPS {
+        uuid tap_id PK "made by the gate, idempotency"
+        varchar gate_id
+        varchar station "from the gate's enrollment"
+        varchar direction "Entry, Exit"
+        uuid ticket_id FK "ON DELETE RESTRICT"
+        char request_hash "SHA-256 of gate, station, direction, QR"
+        boolean allowed "CHECK matches result"
+        varchar result "gate.entered, gate.already_inside, ..."
+        jsonb response "the decision, replayed"
+        timestamptz created_at
+    }
 ```
 
-`users` lives in `identity_db`. `stations` and `segments` live in `network_db`. `wallets`, `ledger_entries`, `topups` and `payment_events` live in `core_db`; `wallets.user_id` holds an Identity user id with no FK, because that table is in another database.
+`users` lives in `identity_db`. `stations` and `segments` live in `network_db`. `wallets`, `ledger_entries`, `topups`, `payment_events`, `tickets`, `idempotency_keys`, `journeys` and `gate_taps` live in `core_db`; `wallets.user_id` holds an Identity user id with no FK, because that table is in another database.
 
 ### 📋 Tables
 
@@ -219,11 +251,13 @@ erDiagram
 | `stations` | network_db | The stations, with readable ids like `agargaon` | `pk_stations (id)` · `ux_stations_name` unique · `ck_stations_id_slug` CHECK |
 | `segments` | network_db | One row per stretch of track and its length | `pk_segments (station_a, station_b)` · 2 FKs → `stations` with `ON DELETE RESTRICT` · `ck_segments_canonical_order` CHECK `station_a < station_b` (byte collation) · `ck_segments_distance_positive` · `ix_segments_station_b` |
 | `wallets` | core_db | One wallet per user and its current balance (a cache of the ledger sum) | `pk_wallets (id)` · `ux_wallets_user_id` unique · `ck_wallets_balance_non_negative` CHECK `balance_poisha >= 0` |
-| `ledger_entries` | core_db | Every movement of money, append-only | `pk_ledger_entries (id)` · `fk_ledger_entries_wallet` → `wallets` `ON DELETE RESTRICT` · `ck_ledger_entries_amount_non_zero` · `ck_ledger_entries_type` · `ix_ledger_entries_wallet_id_id (wallet_id, id)` · `ux_ledger_entries_topup_ref` partial unique `(ref_id) WHERE type = 'TopUp'` · `ux_ledger_entries_refund_ref` partial unique `(ref_id) WHERE type = 'Refund'` |
+| `ledger_entries` | core_db | Every movement of money, append-only | `pk_ledger_entries (id)` · `fk_ledger_entries_wallet` → `wallets` `ON DELETE RESTRICT` · `ck_ledger_entries_amount_non_zero` · `ck_ledger_entries_type` · `ix_ledger_entries_wallet_id_id (wallet_id, id)` · `ux_ledger_entries_topup_ref` partial unique `(ref_id) WHERE type = 'TopUp'` · `ux_ledger_entries_refund_ref` partial unique `(ref_id) WHERE type = 'Refund'` · `ux_ledger_entries_surcharge_ref` partial unique `(ref_id) WHERE type = 'Surcharge'` |
 | `topups` | core_db | A request to add money and its state | `pk_topups (id)` · `fk_topups_wallet` RESTRICT · `ck_topups_amount_positive` · `ck_topups_status` · `ck_topups_completed_at` CHECK `(status = 'Pending') = (completed_at IS NULL)` · `ix_topups_wallet_id_id` |
 | `payment_events` | core_db | The inbox: every provider notification already processed | `pk_payment_events (provider, event_id)` |
 | `tickets` | core_db | Every ticket, with stations and fare copied at purchase | `pk_tickets (id)` · `ck_tickets_different_stations` · `ck_tickets_fare_positive` · `ck_tickets_status` · `ck_tickets_expiry_after_purchase` · `ck_tickets_cancelled_at` · `ix_tickets_user_id_id (user_id, id)` · `ix_tickets_active_expiry (expires_at) WHERE status = 'Active'` |
 | `idempotency_keys` | core_db | One row per purchase key: the request's hash and the answer given | `pk_idempotency_keys (user_id, key)` · `ck_idempotency_keys_response_complete` CHECK `(ticket_id IS NULL) = (response_body IS NULL)` |
+| `journeys` | core_db | One ride per ticket: where and when in, where and when out, the extra paid | `pk_journeys (id)` · `ux_journeys_ticket_id` unique · `fk_journeys_ticket` RESTRICT · `ck_journeys_status` · `ck_journeys_exit_all_or_nothing` CHECK `num_nonnulls(exit_station, exit_tap_id, exited_at, surcharge_poisha) IN (0, 4)` · `ck_journeys_completed_has_exit` · `ck_journeys_surcharge_not_negative` · `ck_journeys_exit_after_entry` |
+| `gate_taps` | core_db | Every gate decision about a ticket, keyed by the gate's own tap id | `pk_gate_taps (tap_id)` · `fk_gate_taps_ticket` RESTRICT · `ck_gate_taps_direction` · `ck_gate_taps_allowed_result` · `ix_gate_taps_ticket_id_created_at (ticket_id, created_at)` |
 
 - 💰 Money is **integer poisha** (৳1 = 100), never a float.
 - 🕒 Times are `timestamptz` (stored in UTC). User ids are **UUIDv7**: unique without coordination, and time-ordered, so new rows land at the right edge of the B+ tree index.
@@ -234,11 +268,14 @@ erDiagram
 
 - 🧩 `ux_ledger_entries_topup_ref` is a **partial** index: only `TopUp` rows are in it, so a ticket id can still appear on a purchase and later on its refund. `ux_ledger_entries_refund_ref` does the same for refunds: at most one `Refund` row per ticket.
 
-- 🎟️ A QR credential is **stateless**: it is signed on request and never stored, so it needs no table. Whether it may still be used is decided by `tickets.status` (the gate, Phase 12).
+- 🎟️ A QR credential is **stateless**: it is signed on request and never stored, so it needs no table. Whether it may still be used is decided by `tickets.status`, which only a gate's guarded `UPDATE` moves.
 
 - 🧩 `ix_tickets_active_expiry` is partial too: only `Active` tickets are in it, so the expiry job (Phase 13) reads a small index however many old tickets pile up.
 
-**Next tables** (designed, built phase by phase): `journeys`, `gate_taps`, `gate_devices`.
+- 🚇 `ux_journeys_ticket_id` makes "a single-journey ticket rides once" a database fact, and is also the index the exit uses to find the open journey. `ux_ledger_entries_surcharge_ref` allows at most one `Surcharge` row per ticket.
+- 🧾 `gate_taps.tap_id` is the primary key, so a resent tap collides there (`INSERT … ON CONFLICT DO NOTHING`) and gets the stored decision back.
+
+**Next tables** (designed): `gate_devices` (enrollment with per-gate public keys, replacing the configured key hashes).
 
 ## 🧰 Tech stack
 
@@ -294,16 +331,18 @@ erDiagram
 │           ├── Ledger/                           LedgerEntry, mapping, LedgerBook (the only code that moves money)
 │           ├── Topups/                           Topup (state machine), mapping, POST/GET /wallet/topups
 │           ├── Payments/                         WebhookSignature (HMAC), inbox PaymentEvent, the webhook
-│           ├── Fares/                            NetworkFareClient: Core → Network over HTTP, errors mapped
+│           ├── Fares/                            NetworkFareClient: Core → Network over HTTP (fares, station lookup), errors mapped
 │           ├── Tickets/                          Ticket (state + snapshot), TicketPurchase, TicketCancellation, list/buy/get/cancel
 │           ├── Credentials/                      QrKeys, TicketCredentialIssuer (ES256 JWS), TicketCredentialVerifier, QR + JWKS endpoints
+│           ├── Gates/                            GateDevices (hashed keys), Journey, GateTap, GateTaps (entry/exit), POST /gate/taps
 │           ├── Idempotency/                      IdempotencyRecord (per-user key, request hash, stored answer)
 │           └── Data/                             DbContext, migrations
 ├── tests/                                        one test project per service + building blocks + gateway
 ├── deploy/
 │   ├── postgres/init.sh                          one database + one login role per service
 │   ├── dev-secrets.sh                            random local passwords and keys into .env (git-ignored)
-│   └── fake-payment.sh                           plays the payment provider: signs and sends a webhook
+│   ├── fake-payment.sh                           plays the payment provider: signs and sends a webhook
+│   └── gate-tap.sh                               plays a gate device: sends a tap with the gate's key from .env
 ├── docs/
 │   ├── PRD.md                                    product requirements
 │   └── adr/                                      19 architecture decision records
@@ -336,6 +375,9 @@ erDiagram
 | `QR_SIGNING_KEY_PEM` → `Qr__SigningKeyPem` | Compose → Core | Core's own ES256 private key for ticket QR credentials (EC P-256 PEM), separate from Identity's. Required outside Development; generated by `dev-secrets.sh` |
 | `Qr__RetiredPublicKeyPems__0`, `__1`, … | Core | Optional: public keys of earlier QR keys, kept in the JWKS after a rotation so QR codes already issued keep verifying |
 | `PAYMENT_WEBHOOK_SECRET` → `Payments__WebhookSecret` | Compose → Core | HMAC secret shared with the payment provider (at least 32 characters). Required outside Development; generated by `dev-secrets.sh` |
+| `GATE_<STATION>_KEY` | `deploy/gate-tap.sh` (the gate's side) | Each local gate's random key (`openssl rand -hex 32`). Never given to Core |
+| `GATE_<STATION>_KEY_SHA256` → `Gate__Devices__N__KeySha256` | Compose → Core | The SHA-256 (hex) of that key. With `Gate__Devices__N__Id` and `Gate__Devices__N__Station` it enrolls one gate. A malformed or duplicate entry stops Core at startup |
+| `Gate__ExitGracePeriod` | Core | How long after its ticket's service day a QR still opens an exit gate (default `03:00:00`) |
 | `Services__NetworkUrl` | Core | Base URL of the Network service for fare quotes (default `http://localhost:5102/`; `http://network:8080/` in Compose) |
 | `RateLimiting__TokenLimit`, `RateLimiting__TokensPerPeriod` | gateway | Rate-limit bucket size and refill per second |
 
@@ -431,7 +473,16 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | ⭐ 50 parallel credential requests all verify; 10 cancels racing 20 credential requests → one refund, each credential request `200` or `409`, and a cancelled ticket's old QR still verifies (so the gate must check the database) | `TicketCredentialEndpointTests.cs` |
 | A QR credential sent as a login token → `401`; the QR key is not Identity's; JWKS is public, cacheable and has no `d` | `TicketCredentialEndpointTests.cs` |
 | ES256 key loading shared by Identity and Core: one PEM one `kid`, one-line PEM, public key can't sign, P-384 / RSA / garbage refused, no key outside Development → refuse to start | `tests/TransitPass.BuildingBlocks.Tests/Es256KeyTests.cs` |
-| The gateway passes the `Authorization` header through unchanged | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
+| Gate: entry → exit at the bought destination (journey `InProgress` → `Completed`, ticket `Used`, no charge, two tap rows); a longer trip → one `Surcharge` row for the difference; a shorter trip → no charge, no refund; entry at another station is priced from where he entered; leaving where he came in asks Network for nothing | `tests/TransitPass.Core.Tests/GateTapTests.cs` |
+| Gate: a surcharge the wallet can't cover → `422 gate.insufficient_funds`, ticket stays `InJourney`, nothing charged, and a new tap after a top-up opens; a surcharge of exactly the balance leaves 0 | `GateTapTests.cs` |
+| Gate: a resent `tapId` replays the answer (`Idempotent-Replayed: true`), refusals too, with no second effect; the same `tapId` for another QR, gate or direction → `422 gate.tap_reused` | `GateTapTests.cs` |
+| ⭐ Gate races: the same QR at 4 gates (20 taps) → 1 entry, 19 × `409 gate.already_inside`; 20 exits at 2 gates → 1 exit, 1 surcharge; 20 copies of one `tapId` → 1 entry, 20 identical answers; entry vs cancel on 30 tickets → exactly one winner each; a storm of 75 entries, exits and cancels on one wallet → no deadlock, only `200`/`409`, `SUM(ledger) == balance` | `GateTapTests.cs` |
+| Gate state: entering twice, exiting twice, exiting without entering, a cancelled or used ticket → `409` with the right code; a ticket inside can't be cancelled; an `InJourney` ticket with no entry on record → `409`, not a crash | `GateTapTests.cs` |
+| Gate QR: forged signature, garbage, a login token → `403 credential.invalid`; an expired QR can't enter (`403 credential.expired`); past `expires_at` but inside the 30 s skew → `409 ticket.expired`; inside the 3 h exit grace → exit opens; past it → `403`; a genuine QR for an unknown ticket → `404` | `GateTapTests.cs`, `TicketCredentialVerifierTests.cs` |
+| Gate auth: wrong key, another gate's key, unknown gate, no header, a user's token → `401 gate.unauthorized`, nothing written; a gate claiming another station → `403`; malformed body → `400`; Network 404 / 5xx / refused / timeout → `404` / `503`, nothing changes, and the same `tapId` works once Network is back | `GateTapTests.cs` |
+| Gate enrollment: SHA-256 like openssl, right key → the gate and its station, wrong / missing / oversized key (even one that starts with the real key) or unknown id → refused; a bad or duplicate enrollment, the hash of an empty key, or a negative exit grace → refuse to start | `tests/TransitPass.Core.Tests/GateDevicesTests.cs` |
+| The database refuses a second `Surcharge` row, a second journey for a ticket, a half-recorded exit, an open journey with an exit, and an "allowed" tap with a refusal code | `GateTapTests.cs` |
+| The gateway passes the `Authorization` header through unchanged, and a gate's `X-Gate-Key` and POST body to Core | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
 | Fare quotes end to end, and 400 / 404 / 422 problems with their codes | `tests/TransitPass.Network.Tests/FareEndpointTests.cs`, `RouteGraphTests.cs` |
@@ -464,6 +515,7 @@ All paths go through the gateway at `http://localhost:5100`.
 | POST | `/api/v1/tickets/{id}/cancel` 🔒 | `200` with the ticket (`status: "Cancelled"`, `cancelledAt`) and the fare back in the wallet; again → the same `200`, no second refund; scanned, used or expired → `409` |
 | GET | `/api/v1/tickets/{id}/credential` 🔒 | `200 { ticketId, credential, expiresAt }` (ES256 JWS for the QR code, `Cache-Control: no-store`); not yours → `404`; cancelled, used or expired → `409` |
 | GET | `/api/v1/gate/.well-known/jwks.json` | Public: the QR public key(s) as a JWK set for gates, `Cache-Control: public, max-age=300` |
+| POST | `/api/v1/gate/taps` 🚪 | For gate devices, authenticated by `X-Gate-Key`, not a user token. `{ tapId, gateId, stationId, direction: "entry" \| "exit", credential }` → open: `200 { tapId, allowed: true, code: "gate.entered" \| "gate.exited", message, direction, ticketId, station, ticketStatus, surchargePoisha }`; closed: a `409`/`422` problem with the same fields and `allowed: false`; a resent `tapId` → the same answer with `Idempotent-Replayed: true` |
 | POST | `/api/v1/payments/webhook` | For the payment provider, authenticated by `Payment-Signature`, not a token → `200 { result: "applied" \| "duplicate" \| "already_final" }` |
 | GET | `/api/v1/wallet/me/transactions?after=&limit=` 🔒 | `200 { items: [{ id, amountPoisha, type, refId, createdAt }], nextCursor }`, newest first; bad cursor → `400 pagination.invalid_cursor` |
 
@@ -474,6 +526,11 @@ curl -s "localhost:5100/api/v1/network/fares/quote?from=uttara-north&to=motijhee
 curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: application/json' \
   -d '{"phone":"01711000001","name":"Rafi","password":"s3cret-pass"}'
 # 201 {"id":"019a…","phone":"+8801711000001","name":"Rafi","createdAt":"…"}
+
+./deploy/gate-tap.sh uttara-north entry "$QR"     # the gate at Uttara North, with its key from .env
+# {"tapId":"…","allowed":true,"code":"gate.entered",…,"ticketStatus":"InJourney","surchargePoisha":0}
+./deploy/gate-tap.sh motijheel exit "$QR"
+# {"tapId":"…","allowed":true,"code":"gate.exited",…,"ticketStatus":"Used","surchargePoisha":0}
 ```
 
 ### ❗ Errors
@@ -487,14 +544,14 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 
 | Status | When | Codes so far |
 |---|---|---|
-| `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password`, `identity.invalid_request`, `pagination.invalid_cursor`, `topup.invalid_amount`, `payment.invalid_event`, `payment.body_too_large`, `ticket.invalid_request`, `idempotency.key_required`, `idempotency.invalid_key` |
-| `401` | Login failed (always the same answer), or no or bad access token (`WWW-Authenticate: Bearer`) | `identity.invalid_credentials`, `auth.unauthenticated`, `payment.invalid_signature`; from the QR verifier (returned by the gate in Phase 12): `credential.invalid`, `credential.expired` |
-| `403` | Valid token, but not allowed | `auth.forbidden` (no route needs it yet: someone else's data answers `404`, so ids can't be probed) |
+| `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password`, `identity.invalid_request`, `pagination.invalid_cursor`, `topup.invalid_amount`, `payment.invalid_event`, `payment.body_too_large`, `ticket.invalid_request`, `idempotency.key_required`, `idempotency.invalid_key`, `gate.invalid_request` |
+| `401` | Login failed (always the same answer), no or bad access token (`WWW-Authenticate: Bearer`), or an unknown gate / wrong gate key | `identity.invalid_credentials`, `auth.unauthenticated`, `payment.invalid_signature`, `gate.unauthorized` |
+| `403` | Authenticated, but not allowed: a gate claiming another station, or a passenger's QR the gate refuses | `auth.forbidden` (no user route needs it: someone else's data answers `404`, so ids can't be probed), `gate.wrong_station`, `credential.invalid`, `credential.expired` |
 | `404` | It doesn't exist (or isn't yours) | `station.not_found`, `topup.not_found`, `payment.unknown_topup`, `ticket.not_found` |
-| `409` | It conflicts with what's already there | `user.phone_taken`, `idempotency.in_progress`, `ticket.not_cancellable`, `ticket.expired`, `ticket.not_usable` |
-| `422` | Valid request, but a business rule says no | `fare.no_route`, `payment.amount_mismatch`, `wallet.insufficient_funds`, `idempotency.key_reused` |
+| `409` | It conflicts with what's already there | `user.phone_taken`, `idempotency.in_progress`, `ticket.not_cancellable`, `ticket.expired`, `ticket.not_usable`, `gate.already_inside`, `gate.not_inside`, `gate.already_exited`, `gate.tap_in_progress` |
+| `422` | Valid request, but a business rule says no | `fare.no_route`, `payment.amount_mismatch`, `wallet.insufficient_funds`, `idempotency.key_reused`, `gate.insufficient_funds`, `gate.tap_reused` |
 | `429` | Too many requests | gateway limit per IP; `identity.too_many_attempts` (5 logins per minute per phone), both with `Retry-After` |
-| `503` | A dependency is down: the database (`/health/ready`), or Network during a purchase | `network.unavailable` |
+| `503` | A dependency is down: the database (`/health/ready`), or Network during a purchase or a gate tap | `network.unavailable` |
 
 ## 💰 Fare model
 
@@ -573,11 +630,27 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 ### Built: the screenshot of a QR code
 - 🎯 **The case:** Rafi screenshots his QR and sends it to a friend, or keeps the QR of a ticket he then cancels for a refund.
 - ❌ **The naive way** trusts the QR alone: the signature is genuine, so the gate opens for both phones, or for a refunded ticket.
-- ✅ **TransitPass splits the two questions.** The signature answers "did Core issue this, unchanged?" and works offline. The ticket row answers "is it still unused?": the gate (Phase 12) moves the ticket with `UPDATE … WHERE status = 'Active'`, so the second scan of a copy, or a scan after a cancel, matches 0 rows.
+- ✅ **TransitPass splits the two questions.** The signature answers "did Core issue this, unchanged?" and works offline. The ticket row answers "is it still unused?": the gate moves the ticket with `UPDATE … WHERE status = 'Active'`, so the second scan of a copy, or a scan after a cancel, matches 0 rows.
 - 🧪 **Proof:** a cancelled ticket's old QR still verifies (the test pins this down on purpose), while its row says `Cancelled`; 10 cancels racing 20 credential requests → one refund, and no credential after the cancel won.
 
-### Designed (next phases): gates and jobs
-- 🔐 Gate taps lock rows in one fixed order (ticket → journey → account), so two gates can't deadlock. Background jobs use `FOR UPDATE SKIP LOCKED`, so several workers never take the same row.
+### Built: one QR at two gates
+- 🎯 **The case:** Rafi's friend holds a screenshot of Rafi's QR at the next gate, and both tap at the same instant. Later, both try to leave at once.
+- ❌ **The naive way** reads the ticket (`Active` for both), opens both gates, then saves `InJourney` twice. Two people ride on one ticket, and at the exit the surcharge is charged twice.
+- ✅ **TransitPass** moves the ticket with `UPDATE tickets SET status = 'InJourney' WHERE id = … AND status = 'Active'` in the same transaction as the `journeys` row. The first gate's update locks the row; the second waits, re-checks on the committed row (`InJourney`), matches 0 rows and answers `409 gate.already_inside`. Exits do the same with `WHERE status = 'InJourney'`, and the surcharge is in the winner's transaction only (plus a partial unique index: one `Surcharge` row per ticket).
+- 🧪 **Proof:** 20 taps of one QR at four gates → 1 entry, 19 refused; 20 exits at two gates → 1 exit, 1 surcharge; live through the gateway: 20 parallel taps → `1 gate.entered`, `19 gate.already_inside`.
+
+### Built: the gate that retried
+- 🎯 **The case:** the gate sends a tap, the network drops the answer, and the gate sends it again (maybe while the first is still running).
+- ✅ The gate makes a `tapId` for each physical tap. The decision is written to `gate_taps` (PK `tap_id`) with `INSERT … ON CONFLICT DO NOTHING` as the **last statement of the same transaction** that moved the ticket. A twin waits on that row: if the first commits, the twin's own work is rolled back and the stored decision is replayed. A refusal is stored too, so the gate gets the same answer every time; a `503` is not stored, so the same `tapId` works once Network is back.
+- 🧪 **Proof:** 20 copies of one `tapId` at once → 1 journey, 1 tap row, 20 identical `200`s.
+
+### Built: no deadlocks (lock order)
+- 🎯 **The case:** many gates, cancels and surcharges at once on tickets of **one wallet**. If transaction A locks the ticket then waits for the wallet, while B locks the wallet then waits for the ticket, each waits for the other forever (PostgreSQL kills one with `40P01`).
+- ✅ **Every path takes locks in the same order: ticket → journey → wallet** (cancel: ticket → wallet; the tap row last). A cycle needs someone to go the other way, and nobody does. Network calls happen **before** the transaction, so no lock is held during HTTP.
+- 🧪 **Proof:** 75 concurrent entries, exits with surcharges and cancels on one wallet → only `200`/`409`, every exit charged once, `SUM(ledger) == balance`; `pg_stat_database.deadlocks` stayed `0` in the live run.
+
+### Designed (next phase): jobs
+- 🔐 Background jobs use `FOR UPDATE SKIP LOCKED`, so several workers never take the same row.
 
 ## 🛡️ Security basics
 
@@ -595,6 +668,7 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - 🛂 **Zero trust between services:** the gateway does not verify tokens and doesn't need to be trusted. Each service verifies every request itself, so a call that skips the gateway (from inside the network) is checked just the same.
 - 🧾 **Payment webhooks:** HMAC-SHA256 with a shared secret from `.env`, constant-time comparison, a 5-minute replay window with the timestamp inside the MAC, a 64 KB body cap, and the body is not parsed until the signature is valid. Money is credited only by this webhook, never by the client.
 - 🎟️ **QR credentials:** signed by Core's **own** ES256 key, so a leaked login key can't mint tickets and a leaked QR key can't mint logins. Explicit `typ` (RFC 8725), separate issuer and audience, the algorithm pinned by the verifier (never taken from the header), `kid` required to match (no "try every key"), and input over 2 KB refused before parsing. The payload is signed, not encrypted: it holds only ids and station names.
+- 🚪 **Gate devices:** each gate has its own 256-bit random key; Core keeps only its SHA-256 (a fast hash is enough for random keys; slow hashing is for human passwords), compares in constant time, and answers an unknown gate exactly like a wrong key. The gate's station comes from its enrollment, never from the request. A passenger's login token can't open a gate, and a gate key can't act as a passenger.
 - 🧾 **Identity comes from the token only:** endpoints read the user from `sub`, so `/wallet/me` can't be pointed at someone else's wallet.
 
 ## 📌 Key decisions and trade-offs
@@ -622,7 +696,7 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 - 💳 **The payment provider is simulated** (`deploy/fake-payment.sh`). A real one (bKash, SSLCommerz) needs its own signature format and a sandbox account; the inbox, state machine and ledger stay the same.
 - ⏳ **No reconciliation job yet.** A top-up whose webhook never arrives stays `Pending`; a real system asks the provider about old pending top-ups and expires them.
 - 📒 **Single-sided ledger.** Each movement is one row on the user's wallet. Full double-entry (a matching row on a system account, so every transaction sums to zero) is not modelled yet.
-- 🎫 **No gate yet** (Phase 12): the QR verifier is built, but nothing scans with it. The QR is static for the whole service day, so a screenshot is good until the first scan (rotating, device-bound QR codes are a bonus item). An `InJourney` ticket past midnight gets no new QR; the gate's exit rule will handle that. Cancel refunds the full fare with no fee, and the ticket list can't be filtered by status yet.
+- 🎫 **Gates are online only.** A gate needs Core (and Network, for the station check and the exit fare) to open; there is no offline mode yet (the SQLite gate agent is a bonus item). Gate keys are shared secrets sent on every call (hashed at rest, TLS in production); per-gate ES256 request signing with an enrollment flow is the planned upgrade. The QR is static for the whole service day, so a screenshot works until the first scan (rotating, device-bound QR codes are a bonus item). No overstay limit: a journey left open is not closed automatically yet, and someone still inside more than 3 h after midnight can't exit with the QR (staff must help). A stored refusal is replayed for its `tapId`, so after a top-up the gate must send a new `tapId`. The gateway's rate limit is per IP, so many gates behind one station NAT share one bucket. Cancel refunds the full fare with no fee, and the ticket list can't be filtered by status yet.
 - 🔁 **No retry or circuit breaker on the Network call,** only a 3 s timeout; a failed quote is a `503` the app can retry with the same key. Idempotency keys are kept forever for now (a cleanup job is planned).
 - 📱 **Bangladeshi mobile numbers only,** and phones are not verified (no OTP yet).
 - 🗺️ **Seed network is four stations.** Station and track changes are made through migrations, and the fare graph picks them up on restart.
@@ -648,8 +722,8 @@ Each phase is one small pull request with its own tests.
 | 9 | Ticket purchase: `Idempotency-Key`, atomic debit, a 200-way concurrency test | ✅ #15 |
 | 10 | Ticket list and cancel with refund (ledger reversal) | ✅ #16 |
 | 11 | Signed QR credential (ES256 JWS, own key, JWKS for gates, verifier) | ✅ #17 |
-| 12 | Gate entry and exit: a journey state machine, row locks in a fixed order | ⏳ next |
-| 13 | Background refunds for expired tickets (`SKIP LOCKED`, a partial index) | |
+| 12 | Gate entry and exit: a journey state machine, row locks in a fixed order | ✅ #18 |
+| 13 | Background refunds for expired tickets (`SKIP LOCKED`, a partial index) | ⏳ next |
 | 14 | Demo script: sign up → top up → buy → tap in → tap out | |
 
 **After that:** refresh token rotation, phone OTP, Redis for rate limits and replay checks, a rotating device-bound QR code, an offline gate agent (SQLite outbox), a Next.js app and OpenTelemetry tracing.

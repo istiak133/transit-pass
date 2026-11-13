@@ -348,6 +348,32 @@ public sealed class TicketCredentialVerifierTests : IDisposable
     }
 
     [Fact]
+    public async Task An_exit_grace_accepts_a_recently_expired_credential_only_inside_the_window()
+    {
+        Ticket ticket = NewTicket();
+        string credential = _issuer.Issue(ticket, Now);
+        TimeSpan grace = TimeSpan.FromHours(3);
+
+        _clock.Now = ticket.ExpiresAt.AddHours(2); // entered at 23:50, leaving at 02:00 Dhaka time
+        (await _verifier.VerifyAsync(credential)).Error!.Code.ShouldBe("credential.expired");
+        (await _verifier.VerifyAsync(credential, grace)).IsSuccess.ShouldBeTrue();
+
+        _clock.Now = ticket.ExpiresAt + grace + TimeSpan.FromSeconds(31); // past grace and skew
+        (await _verifier.VerifyAsync(credential, grace)).Error!.Code.ShouldBe("credential.expired");
+    }
+
+    [Fact]
+    public async Task The_exit_grace_never_makes_a_forgery_pass_and_cannot_be_negative()
+    {
+        string credential = _issuer.Issue(NewTicket(), Now);
+        string[] p = credential.Split('.');
+
+        (await _verifier.VerifyAsync($"{p[0]}.{p[1]}.{p[2][..^4]}AAAA", TimeSpan.FromDays(365))).Error!.Code
+            .ShouldBe("credential.invalid");
+        await Should.ThrowAsync<ArgumentOutOfRangeException>(() => _verifier.VerifyAsync(credential, TimeSpan.FromSeconds(-1)));
+    }
+
+    [Fact]
     public async Task An_expired_forgery_is_invalid_not_expired()
     {
         // The signature is checked first: a forgery never learns whether its dates would have passed.
