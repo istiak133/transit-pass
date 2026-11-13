@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-237%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-288%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -90,6 +90,11 @@ TransitPass started from studying an open-source student metro ticketing project
 - **Network trouble is not the user's fault:** Network's own answers pass through (`404 station.not_found`, `400 fare.same_station`, `422 fare.no_route`); down, 5xx, a timeout or garbage become `503 network.unavailable`. None of them move money
 - **My tickets:** `GET /api/v1/tickets?after=&limit=` pages newest first with the same keyset cursor as the wallet history, on `ix_tickets_user_id_id`
 - **Cancel with refund:** `POST /api/v1/tickets/{id}/cancel` moves the ticket with one guarded update (`WHERE status = 'Active' AND expires_at > now`) and credits the fare back as a new `Refund` ledger row (a reversal; the purchase row is never edited), in one transaction. Cancelling again returns the same `200` with no second refund; a ticket already scanned, used or past its service day → `409`
+- **Signed QR credential:** `GET /api/v1/tickets/{id}/credential` returns a compact **JWS signed with ES256 by Core's own QR key** (not Identity's): `tid`, `sub`, `from`, `to`, `iat`, and `exp` = the ticket's own expiry. The app shows it as a QR code; `Cache-Control: no-store`
+- **Gates verify offline:** `GET /api/v1/gate/.well-known/jwks.json` publishes the QR public key(s) with a `kid`. `TicketCredentialVerifier` checks a QR with **public keys only**: ES256 pinned, `kid` must match, `typ` must be `transitpass-ticket+jwt`, issuer `transitpass-core`, audience `transitpass-gate`, `exp` with 30 s of clock skew
+- **A login token is never a ticket, and a ticket is never a login:** different key, `typ`, issuer and audience, each enough on its own
+- **Only usable tickets get a QR:** `Active` (to enter) or `InJourney` (to exit) → `200`; `Cancelled`, `Used`, `Expired` → `409 ticket.not_usable`; still `Active` but past its service day → `409 ticket.expired`; someone else's → `404`
+- **Key rotation:** retired public keys (`Qr__RetiredPublicKeyPems__N`) stay in the JWKS and keep verifying old QR codes by `kid` until they expire
 
 **🛠️ Engineering**
 - Database-per-service: each service logs in as its own PostgreSQL role, and the others cannot even connect
@@ -229,6 +234,8 @@ erDiagram
 
 - 🧩 `ux_ledger_entries_topup_ref` is a **partial** index: only `TopUp` rows are in it, so a ticket id can still appear on a purchase and later on its refund. `ux_ledger_entries_refund_ref` does the same for refunds: at most one `Refund` row per ticket.
 
+- 🎟️ A QR credential is **stateless**: it is signed on request and never stored, so it needs no table. Whether it may still be used is decided by `tickets.status` (the gate, Phase 12).
+
 - 🧩 `ix_tickets_active_expiry` is partial too: only `Active` tickets are in it, so the expiry job (Phase 13) reads a small index however many old tickets pile up.
 
 **Next tables** (designed, built phase by phase): `journeys`, `gate_taps`, `gate_devices`.
@@ -271,7 +278,7 @@ erDiagram
 │   │   ├── Http/                                 Result → status code + RFC 9457 problem
 │   │   ├── Pagination/                           opaque cursor, PageRequest (limit+1), CursorPage
 │   │   ├── Hosting/                              service defaults, request id, Postgres pool + health check
-│   │   └── Auth/                                 JWT verification: JWKS key cache, ES256 only, 401/403 problems
+│   │   └── Auth/                                 JWT verification (JWKS key cache, ES256 only, 401/403); Es256Key (PEM load, kid, JWK)
 │   └── Services/
 │       ├── Identity/TransitPass.Identity.Api/
 │       │   ├── Users/                            User, mapping, PhoneNumber, PasswordHasher, register endpoint
@@ -289,6 +296,7 @@ erDiagram
 │           ├── Payments/                         WebhookSignature (HMAC), inbox PaymentEvent, the webhook
 │           ├── Fares/                            NetworkFareClient: Core → Network over HTTP, errors mapped
 │           ├── Tickets/                          Ticket (state + snapshot), TicketPurchase, TicketCancellation, list/buy/get/cancel
+│           ├── Credentials/                      QrKeys, TicketCredentialIssuer (ES256 JWS), TicketCredentialVerifier, QR + JWKS endpoints
 │           ├── Idempotency/                      IdempotencyRecord (per-user key, request hash, stored answer)
 │           └── Data/                             DbContext, migrations
 ├── tests/                                        one test project per service + building blocks + gateway
@@ -325,6 +333,8 @@ erDiagram
 | `Database__MigrateOnStartup` | each service | Apply migrations on start (`true` in Development only) |
 | `Jwt__JwksUrl`, `Jwt__RequireHttps` | Core (any verifying service) | Where Identity's public keys are, and whether to insist on HTTPS (off inside the private Compose network) |
 | `JWT_SIGNING_KEY_PEM` → `Jwt__SigningKeyPem` | Compose → Identity | ES256 private key (EC P-256, PKCS#8 PEM). Required outside Development; generated by `dev-secrets.sh` |
+| `QR_SIGNING_KEY_PEM` → `Qr__SigningKeyPem` | Compose → Core | Core's own ES256 private key for ticket QR credentials (EC P-256 PEM), separate from Identity's. Required outside Development; generated by `dev-secrets.sh` |
+| `Qr__RetiredPublicKeyPems__0`, `__1`, … | Core | Optional: public keys of earlier QR keys, kept in the JWKS after a rotation so QR codes already issued keep verifying |
 | `PAYMENT_WEBHOOK_SECRET` → `Payments__WebhookSecret` | Compose → Core | HMAC secret shared with the payment provider (at least 32 characters). Required outside Development; generated by `dev-secrets.sh` |
 | `Services__NetworkUrl` | Core | Base URL of the Network service for fare quotes (default `http://localhost:5102/`; `http://network:8080/` in Compose) |
 | `RateLimiting__TokenLimit`, `RateLimiting__TokensPerPeriod` | gateway | Rate-limit bucket size and refill per second |
@@ -414,6 +424,13 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | ⭐ 20 simultaneous cancels → 1 refund; cancel racing a gate scan on 30 tickets → exactly one winner per ticket, `SUM(ledger) == balance` | `TicketLifecycleTests.cs` |
 | The database refuses a second `Refund` row for one ticket, and the failed posting rolls back its balance change | `TicketLifecycleTests.cs` |
 | Ticket list pages newest first with no gaps or repeats, shows only the caller's tickets; empty page; bad cursor `400`; no token `401` | `TicketLifecycleTests.cs` |
+| A ticket's QR credential verifies with only the public key; claims `tid`, `sub`, `from`, `to`, `iat`, `exp` (= ticket expiry) and header `typ`, `kid` are exactly as designed | `tests/TransitPass.Core.Tests/TicketCredentialVerifierTests.cs` |
+| Rejected: a changed payload, a changed or missing signature, another key (even with our `kid`), `alg: none`, HS256 with the public key as the secret, a login token (even signed with the QR key), wrong `typ` / issuer / audience, no `exp`, a future `nbf`, a bad `tid`, garbage and oversized input | `TicketCredentialVerifierTests.cs` |
+| Expiry with 30 s of clock skew (`credential.expired`); rotation: old QR codes verify through a retired public key by `kid`, and stop once it is dropped; a gate verifies with nothing but the JWKS document | `TicketCredentialVerifierTests.cs` |
+| `GET /tickets/{id}/credential`: owner `200` + `no-store`; someone else's or unknown → `404`; no token `401`; `Cancelled`/`Used`/`Expired` → `409 ticket.not_usable`; past its day → `409 ticket.expired`; `InJourney` → `200`; moves no money | `tests/TransitPass.Core.Tests/TicketCredentialEndpointTests.cs` |
+| ⭐ 50 parallel credential requests all verify; 10 cancels racing 20 credential requests → one refund, each credential request `200` or `409`, and a cancelled ticket's old QR still verifies (so the gate must check the database) | `TicketCredentialEndpointTests.cs` |
+| A QR credential sent as a login token → `401`; the QR key is not Identity's; JWKS is public, cacheable and has no `d` | `TicketCredentialEndpointTests.cs` |
+| ES256 key loading shared by Identity and Core: one PEM one `kid`, one-line PEM, public key can't sign, P-384 / RSA / garbage refused, no key outside Development → refuse to start | `tests/TransitPass.BuildingBlocks.Tests/Es256KeyTests.cs` |
 | The gateway passes the `Authorization` header through unchanged | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
@@ -445,6 +462,8 @@ All paths go through the gateway at `http://localhost:5100`.
 | GET | `/api/v1/tickets?after=&limit=` 🔒 | `200 { items: [ticket…], nextCursor }`, the caller's tickets, newest first |
 | GET | `/api/v1/tickets/{id}` 🔒 | The caller's own ticket; anyone else's → `404 ticket.not_found` |
 | POST | `/api/v1/tickets/{id}/cancel` 🔒 | `200` with the ticket (`status: "Cancelled"`, `cancelledAt`) and the fare back in the wallet; again → the same `200`, no second refund; scanned, used or expired → `409` |
+| GET | `/api/v1/tickets/{id}/credential` 🔒 | `200 { ticketId, credential, expiresAt }` (ES256 JWS for the QR code, `Cache-Control: no-store`); not yours → `404`; cancelled, used or expired → `409` |
+| GET | `/api/v1/gate/.well-known/jwks.json` | Public: the QR public key(s) as a JWK set for gates, `Cache-Control: public, max-age=300` |
 | POST | `/api/v1/payments/webhook` | For the payment provider, authenticated by `Payment-Signature`, not a token → `200 { result: "applied" \| "duplicate" \| "already_final" }` |
 | GET | `/api/v1/wallet/me/transactions?after=&limit=` 🔒 | `200 { items: [{ id, amountPoisha, type, refId, createdAt }], nextCursor }`, newest first; bad cursor → `400 pagination.invalid_cursor` |
 
@@ -469,10 +488,10 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 | Status | When | Codes so far |
 |---|---|---|
 | `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password`, `identity.invalid_request`, `pagination.invalid_cursor`, `topup.invalid_amount`, `payment.invalid_event`, `payment.body_too_large`, `ticket.invalid_request`, `idempotency.key_required`, `idempotency.invalid_key` |
-| `401` | Login failed (always the same answer), or no or bad access token (`WWW-Authenticate: Bearer`) | `identity.invalid_credentials`, `auth.unauthenticated`, `payment.invalid_signature` |
+| `401` | Login failed (always the same answer), or no or bad access token (`WWW-Authenticate: Bearer`) | `identity.invalid_credentials`, `auth.unauthenticated`, `payment.invalid_signature`; from the QR verifier (returned by the gate in Phase 12): `credential.invalid`, `credential.expired` |
 | `403` | Valid token, but not allowed | `auth.forbidden` (no route needs it yet: someone else's data answers `404`, so ids can't be probed) |
 | `404` | It doesn't exist (or isn't yours) | `station.not_found`, `topup.not_found`, `payment.unknown_topup`, `ticket.not_found` |
-| `409` | It conflicts with what's already there | `user.phone_taken`, `idempotency.in_progress`, `ticket.not_cancellable`, `ticket.expired` |
+| `409` | It conflicts with what's already there | `user.phone_taken`, `idempotency.in_progress`, `ticket.not_cancellable`, `ticket.expired`, `ticket.not_usable` |
 | `422` | Valid request, but a business rule says no | `fare.no_route`, `payment.amount_mismatch`, `wallet.insufficient_funds`, `idempotency.key_reused` |
 | `429` | Too many requests | gateway limit per IP; `identity.too_many_attempts` (5 logins per minute per phone), both with `Retry-After` |
 | `503` | A dependency is down: the database (`/health/ready`), or Network during a purchase | `network.unavailable` |
@@ -551,6 +570,12 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - ✅ **TransitPass** changes status only with `UPDATE … WHERE status = 'Active'`. The first update locks the row; the second waits, re-checks, and matches 0 rows. The refund is in the same transaction as the cancel, and a partial unique index allows one `Refund` row per ticket.
 - 🧪 **Proof:** 30 tickets, cancel and gate racing on each → exactly one winner per ticket, refunds only for the cancels that won; 20 simultaneous cancels → 1 refund.
 
+### Built: the screenshot of a QR code
+- 🎯 **The case:** Rafi screenshots his QR and sends it to a friend, or keeps the QR of a ticket he then cancels for a refund.
+- ❌ **The naive way** trusts the QR alone: the signature is genuine, so the gate opens for both phones, or for a refunded ticket.
+- ✅ **TransitPass splits the two questions.** The signature answers "did Core issue this, unchanged?" and works offline. The ticket row answers "is it still unused?": the gate (Phase 12) moves the ticket with `UPDATE … WHERE status = 'Active'`, so the second scan of a copy, or a scan after a cancel, matches 0 rows.
+- 🧪 **Proof:** a cancelled ticket's old QR still verifies (the test pins this down on purpose), while its row says `Cancelled`; 10 cancels racing 20 credential requests → one refund, and no credential after the cancel won.
+
 ### Designed (next phases): gates and jobs
 - 🔐 Gate taps lock rows in one fixed order (ticket → journey → account), so two gates can't deadlock. Background jobs use `FOR UPDATE SKIP LOCKED`, so several workers never take the same row.
 
@@ -569,6 +594,7 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - 🚪 **Login hardening:** one uniform `401` with equal timing for unknown phones and wrong passwords, plus 5 attempts per minute per phone on top of the gateway's per-IP limit.
 - 🛂 **Zero trust between services:** the gateway does not verify tokens and doesn't need to be trusted. Each service verifies every request itself, so a call that skips the gateway (from inside the network) is checked just the same.
 - 🧾 **Payment webhooks:** HMAC-SHA256 with a shared secret from `.env`, constant-time comparison, a 5-minute replay window with the timestamp inside the MAC, a 64 KB body cap, and the body is not parsed until the signature is valid. Money is credited only by this webhook, never by the client.
+- 🎟️ **QR credentials:** signed by Core's **own** ES256 key, so a leaked login key can't mint tickets and a leaked QR key can't mint logins. Explicit `typ` (RFC 8725), separate issuer and audience, the algorithm pinned by the verifier (never taken from the header), `kid` required to match (no "try every key"), and input over 2 KB refused before parsing. The payload is signed, not encrypted: it holds only ids and station names.
 - 🧾 **Identity comes from the token only:** endpoints read the user from `sub`, so `/wallet/me` can't be pointed at someone else's wallet.
 
 ## 📌 Key decisions and trade-offs
@@ -596,7 +622,7 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 - 💳 **The payment provider is simulated** (`deploy/fake-payment.sh`). A real one (bKash, SSLCommerz) needs its own signature format and a sandbox account; the inbox, state machine and ledger stay the same.
 - ⏳ **No reconciliation job yet.** A top-up whose webhook never arrives stays `Pending`; a real system asks the provider about old pending top-ups and expires them.
 - 📒 **Single-sided ledger.** Each movement is one row on the user's wallet. Full double-entry (a matching row on a system account, so every transaction sums to zero) is not modelled yet.
-- 🎫 **No QR or gate yet** (Phases 11–12). Cancel refunds the full fare with no fee, and the ticket list can't be filtered by status yet.
+- 🎫 **No gate yet** (Phase 12): the QR verifier is built, but nothing scans with it. The QR is static for the whole service day, so a screenshot is good until the first scan (rotating, device-bound QR codes are a bonus item). An `InJourney` ticket past midnight gets no new QR; the gate's exit rule will handle that. Cancel refunds the full fare with no fee, and the ticket list can't be filtered by status yet.
 - 🔁 **No retry or circuit breaker on the Network call,** only a 3 s timeout; a failed quote is a `503` the app can retry with the same key. Idempotency keys are kept forever for now (a cleanup job is planned).
 - 📱 **Bangladeshi mobile numbers only,** and phones are not verified (no OTP yet).
 - 🗺️ **Seed network is four stations.** Station and track changes are made through migrations, and the fare graph picks them up on restart.
@@ -621,8 +647,8 @@ Each phase is one small pull request with its own tests.
 | 8 | Top-up through an HMAC-signed payment webhook, an inbox for duplicates | ✅ #14 |
 | 9 | Ticket purchase: `Idempotency-Key`, atomic debit, a 200-way concurrency test | ✅ #15 |
 | 10 | Ticket list and cancel with refund (ledger reversal) | ✅ #16 |
-| 11 | Signed QR credential (JWS) | ⏳ next |
-| 12 | Gate entry and exit: a journey state machine, row locks in a fixed order | |
+| 11 | Signed QR credential (ES256 JWS, own key, JWKS for gates, verifier) | ✅ #17 |
+| 12 | Gate entry and exit: a journey state machine, row locks in a fixed order | ⏳ next |
 | 13 | Background refunds for expired tickets (`SKIP LOCKED`, a partial index) | |
 | 14 | Demo script: sign up → top up → buy → tap in → tap out | |
 

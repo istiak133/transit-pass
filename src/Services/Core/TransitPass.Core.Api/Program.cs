@@ -1,5 +1,6 @@
 using TransitPass.BuildingBlocks.Auth;
 using TransitPass.BuildingBlocks.Hosting;
+using TransitPass.Core.Api.Credentials;
 using TransitPass.Core.Api.Data;
 using TransitPass.Core.Api.Fares;
 using TransitPass.Core.Api.Payments;
@@ -19,6 +20,12 @@ builder.AddCoreDatabase();
 builder.AddJwtAuthentication(); // trust Identity's tokens, verified locally with its public keys
 builder.Services.Configure<PaymentOptions>(builder.Configuration.GetSection(PaymentOptions.Section));
 builder.Services.AddSingleton<WebhookSecret>();
+
+// QR credentials: Core signs them with its OWN ES256 key (not Identity's), gates verify with the public half.
+builder.Services.Configure<QrOptions>(builder.Configuration.GetSection(QrOptions.Section));
+builder.Services.AddSingleton<QrKeys>();
+builder.Services.AddSingleton<TicketCredentialIssuer>();
+builder.Services.AddSingleton(TicketCredentialVerifier.Create); // used by the gate in Phase 12
 
 // Core → Network over HTTP for fares. Short timeout: a purchase should fail fast with 503, not hang.
 builder.Services.AddHttpClient<IFareQuotes, NetworkFareClient>(http =>
@@ -43,8 +50,10 @@ app.MapWalletEndpoints();
 app.MapTopupEndpoints();
 app.MapPaymentWebhook(); // anonymous: authenticated by its HMAC signature
 app.MapTicketEndpoints();
+app.MapCredentialEndpoints(); // QR credential + the public keys gates verify it with
 
 _ = app.Services.GetRequiredService<WebhookSecret>(); // fail fast at startup if the secret is missing
+_ = app.Services.GetRequiredService<QrKeys>();       // ...and the same for the QR signing key
 
 await app.MigrateIfEnabledAsync();
 
