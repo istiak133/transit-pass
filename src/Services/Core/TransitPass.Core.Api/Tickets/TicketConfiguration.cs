@@ -15,6 +15,8 @@ internal sealed class TicketConfiguration : IEntityTypeConfiguration<Ticket>
             t.HasCheckConstraint("ck_tickets_status",
                 "status IN ('Active', 'InJourney', 'Used', 'Cancelled', 'Expired')");
             t.HasCheckConstraint("ck_tickets_expiry_after_purchase", "expires_at > purchased_at");
+            // A cancelled ticket always says when; no other ticket has a cancel time.
+            t.HasCheckConstraint("ck_tickets_cancelled_at", "(status = 'Cancelled') = (cancelled_at IS NOT NULL)");
         });
 
         builder.HasKey(t => t.Id).HasName("pk_tickets");
@@ -27,6 +29,7 @@ internal sealed class TicketConfiguration : IEntityTypeConfiguration<Ticket>
         builder.Property(t => t.Status).HasColumnName("status").HasConversion<string>().HasMaxLength(16);
         builder.Property(t => t.PurchasedAt).HasColumnName("purchased_at");
         builder.Property(t => t.ExpiresAt).HasColumnName("expires_at");
+        builder.Property(t => t.CancelledAt).HasColumnName("cancelled_at");
 
         // "My tickets, newest first" (Phase 10's cursor page): O(log n + page).
         builder.HasIndex(t => new { t.UserId, t.Id }).HasDatabaseName("ix_tickets_user_id_id");

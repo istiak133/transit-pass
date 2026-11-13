@@ -100,6 +100,11 @@ namespace TransitPass.Core.Api.Data.Migrations
                     b.HasIndex("WalletId", "Id")
                         .HasDatabaseName("ix_ledger_entries_wallet_id_id");
 
+                    b.HasIndex(new[] { "RefId" }, "ux_ledger_entries_refund_ref")
+                        .IsUnique()
+                        .HasDatabaseName("ux_ledger_entries_refund_ref")
+                        .HasFilter("type = 'Refund'");
+
                     b.ToTable("ledger_entries", null, t =>
                         {
                             t.HasCheckConstraint("ck_ledger_entries_amount_non_zero", "amount_poisha <> 0");
@@ -145,6 +150,10 @@ namespace TransitPass.Core.Api.Data.Migrations
                     b.Property<Guid>("Id")
                         .HasColumnType("uuid")
                         .HasColumnName("id");
+
+                    b.Property<DateTimeOffset?>("CancelledAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("cancelled_at");
 
                     b.Property<long>("DistanceM")
                         .HasColumnType("bigint")
@@ -196,6 +205,8 @@ namespace TransitPass.Core.Api.Data.Migrations
 
                     b.ToTable("tickets", null, t =>
                         {
+                            t.HasCheckConstraint("ck_tickets_cancelled_at", "(status = 'Cancelled') = (cancelled_at IS NOT NULL)");
+
                             t.HasCheckConstraint("ck_tickets_different_stations", "to_station <> from_station");
 
                             t.HasCheckConstraint("ck_tickets_expiry_after_purchase", "expires_at > purchased_at");
