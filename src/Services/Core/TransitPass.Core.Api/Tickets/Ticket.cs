@@ -38,6 +38,9 @@ public sealed class Ticket
     /// <summary>Midnight (Dhaka time) after the purchase: a single-journey ticket is good for that service day.</summary>
     public required DateTimeOffset ExpiresAt { get; init; }
 
+    /// <summary>When Rafi cancelled it; null for every other status (a CHECK enforces the pairing).</summary>
+    public DateTimeOffset? CancelledAt { get; set; }
+
     /// <summary>Dhaka is UTC+6 all year (no daylight saving), so a fixed offset is exact.</summary>
     internal static readonly TimeSpan Dhaka = TimeSpan.FromHours(6);
 
@@ -58,4 +61,4 @@ public sealed record BuyTicketRequest(string? From, string? To);
 /// <summary>A ticket as the API shows it.</summary>
 public sealed record TicketResponse(
     Guid Id, string From, string To, long FarePoisha, long DistanceM, string Status,
-    DateTimeOffset PurchasedAt, DateTimeOffset ExpiresAt);
+    DateTimeOffset PurchasedAt, DateTimeOffset ExpiresAt, DateTimeOffset? CancelledAt = null);

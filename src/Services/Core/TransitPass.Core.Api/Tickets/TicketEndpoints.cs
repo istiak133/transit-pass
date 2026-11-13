@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using TransitPass.BuildingBlocks.Auth;
 using TransitPass.BuildingBlocks.Http;
+using TransitPass.BuildingBlocks.Pagination;
 using TransitPass.BuildingBlocks.Results;
 using TransitPass.Core.Api.Data;
 using TransitPass.Core.Api.Fares;
@@ -52,9 +53,61 @@ public static class TicketEndpoints
                 : TypedResults.Ok(ToResponse(ticket));
         });
 
+        // GET ?after=<cursor>&limit=20 → the caller's tickets, newest first (keyset paging, as in Phase 7).
+        group.MapGet("/", async (ClaimsPrincipal user, CoreDbContext db, string? after, int? limit, CancellationToken ct) =>
+        {
+            var page = PageRequest.Create(after, limit);
+            Guid? afterId = null;
+            if (page.After is not null)
+            {
+                var decoded = Cursor.Decode(page.After);
+                if (!decoded.IsSuccess)
+                {
+                    return decoded.Error.ToProblem();
+                }
+
+                afterId = decoded.Value;
+            }
+
+            return TypedResults.Ok(await ListAsync(db, user.GetUserId(), page, afterId, ct));
+        });
+
+        // POST /{id}/cancel → 200 with the cancelled ticket; the fare goes back to the wallet once.
+        // Cancelling again returns the same 200 (safe to retry), with no second refund.
+        group.MapPost("/{id:guid}/cancel", async (
+            Guid id, ClaimsPrincipal user, CoreDbContext db, TimeProvider clock, CancellationToken ct) =>
+        {
+            var result = await TicketCancellation.CancelAsync(user.GetUserId(), id, db, clock, ct);
+            return result.IsSuccess ? TypedResults.Ok(ToResponse(result.Value)) : result.Error.ToProblem();
+        });
+
         return app;
     }
 
+    /// <summary>
+    /// WHERE user_id = @u AND id &lt; @after ORDER BY id DESC LIMIT n+1, answered by ix_tickets_user_id_id
+    /// (built in Phase 9 for exactly this): O(log n + page), however deep the page.
+    /// </summary>
+    internal static async Task<CursorPage<TicketResponse>> ListAsync(
+        CoreDbContext db, Guid userId, PageRequest page, Guid? afterId, CancellationToken ct)
+    {
+        var tickets = db.Tickets.AsNoTracking().Where(t => t.UserId == userId);
+        if (afterId is Guid cursor)
+        {
+            tickets = tickets.Where(t => t.Id < cursor);
+        }
+
+        List<TicketResponse> rows = await tickets
+            .OrderByDescending(t => t.Id)
+            .Take(page.FetchSize)
+            .Select(t => new TicketResponse(
+                t.Id, t.FromStation, t.ToStation, t.FarePoisha, t.DistanceM, t.Status.ToString(),
+                t.PurchasedAt, t.ExpiresAt, t.CancelledAt))
+            .ToListAsync(ct);
+
+        return CursorPage<TicketResponse>.From(rows, page, r => r.Id);
+    }
+
     internal static TicketResponse ToResponse(Ticket t) =>
-        new(t.Id, t.FromStation, t.ToStation, t.FarePoisha, t.DistanceM, t.Status.ToString(), t.PurchasedAt, t.ExpiresAt);
+        new(t.Id, t.FromStation, t.ToStation, t.FarePoisha, t.DistanceM, t.Status.ToString(), t.PurchasedAt, t.ExpiresAt, t.CancelledAt);
 }

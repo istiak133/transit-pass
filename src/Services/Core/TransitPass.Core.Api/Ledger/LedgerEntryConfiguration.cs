@@ -36,5 +36,10 @@ internal sealed class LedgerEntryConfiguration : IEntityTypeConfiguration<Ledger
         // credit (after the inbox and the state machine). Only TopUp rows are in this index at all.
         builder.HasIndex(e => e.RefId).IsUnique().HasFilter("type = 'TopUp'")
             .HasDatabaseName("ux_ledger_entries_topup_ref");
+
+        // Same idea for refunds (Phase 10): at most one Refund row per ticket. The status guard in
+        // TicketCancellation already makes a second refund impossible; this is the last line of defence.
+        builder.HasIndex([nameof(LedgerEntry.RefId)], "ux_ledger_entries_refund_ref").IsUnique().HasFilter("type = 'Refund'")
+            .HasDatabaseName("ux_ledger_entries_refund_ref");
     }
 }
