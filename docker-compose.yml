@@ -73,6 +73,9 @@ services:
       Jwt__RequireHttps: "false"
       # HMAC secret shared with the payment provider (deploy/fake-payment.sh signs with the same one).
       Payments__WebhookSecret: ${PAYMENT_WEBHOOK_SECRET:?run ./deploy/dev-secrets.sh first}
+      # Core's own ES256 key for ticket QR credentials (not Identity's). Gates get the public half from
+      # GET /api/v1/gate/.well-known/jwks.json.
+      Qr__SigningKeyPem: ${QR_SIGNING_KEY_PEM:?run ./deploy/dev-secrets.sh first}
       # Fares come from the Network service, straight over the private network (not via the gateway).
       Services__NetworkUrl: http://network:8080/
 

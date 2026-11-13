@@ -31,4 +31,11 @@ if ! grep -q "^JWT_SIGNING_KEY_PEM=" .env; then
   add JWT_SIGNING_KEY_PEM "\"$key\""
 fi
 
+# A SECOND, separate ES256 key: Core signs ticket QR credentials with it. Never the same as the JWT key,
+# so a leaked login key can't mint tickets and a leaked QR key can't mint logins.
+if ! grep -q "^QR_SIGNING_KEY_PEM=" .env; then
+  key=$(openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 2>/dev/null | awk '{printf "%s\\n", $0}')
+  add QR_SIGNING_KEY_PEM "\"$key\""
+fi
+
 echo ".env is ready."

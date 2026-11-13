@@ -13,6 +13,8 @@ public sealed class GatewayRoutingTests
     [InlineData("/api/v1/payments/webhook", "core.test")]
     [InlineData("/api/v1/tickets/abc", "core.test")]
     [InlineData("/api/v1/gate/taps", "core.test")]
+    [InlineData("/api/v1/tickets/0199a1b2-0000-7000-8000-000000000001/credential", "core.test")]
+    [InlineData("/api/v1/gate/.well-known/jwks.json", "core.test")]
     public async Task Route_forwards_to_the_owning_service_with_path_and_query_intact(string path, string expectedHost)
     {
         using var factory = new GatewayFactory();
