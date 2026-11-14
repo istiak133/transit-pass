@@ -82,6 +82,7 @@ Demo passed: 16 steps, user 01771722156, ticket 01a1d9b1-1c6e-7bb0-b61b-8d1f657f
 ```
 
 - 🔑 The demo plays the payment provider and the gates too: it signs the webhook with `PAYMENT_WEBHOOK_SECRET` and sends each gate's own key (`GATE_<STATION>_KEY`) from `.env`, exactly as `deploy/fake-payment.sh` and `deploy/gate-tap.sh` do.
+- ⏱️ Run it straight after `docker compose up -d`: the demo first waits (up to 60 s, `WAIT_SECONDS` to change it) until the gateway reaches Identity, Network and Core, and stops with a clear message if they never come up.
 - 🌐 Another address? `GATEWAY_URL=http://host:5100 ./deploy/demo.sh`.
 - 🌙 A ticket that is never used comes back by itself: after Dhaka midnight the expiry job marks it `Expired` and a `Refund` row appears in the history.
 
@@ -182,7 +183,7 @@ flowchart LR
 
 - 🧱 **Four processes, three databases.** Each service owns its data, and no service reads another's tables.
 - 💰 **Why wallet, tickets and gates share one service (Transit Core):** buying a ticket must take the money, record it in the ledger and create the ticket **all together or not at all**. Inside one database that is a single ACID transaction. Split across services, it would need sagas and compensations, for no benefit at this size. See [ADR 0019](docs/adr/0019-microservices-with-transit-core.md).
-- 🔗 **Across services there are no foreign keys.** Core stores the `user_id` taken from a verified token, and copy the stations and fare into the ticket at purchase (a snapshot), so a later price change never alters an old ticket or its refund.
+- 🔗 **Across services there are no foreign keys.** Core stores the `user_id` taken from a verified token, and copies the stations and fare into the ticket at purchase (a snapshot), so a later price change never alters an old ticket or its refund.
 
 ### 🔁 One request, end to end
 
@@ -562,7 +563,7 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Station list (sorted) and lookup, 404 problem with `code` and `traceId`, case-sensitive ids | `tests/TransitPass.Network.Tests/StationEndpointTests.cs` |
 | The gateway routes each prefix to the right service, and rate-limits with 429 | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Result → status code mapping, cursor encoding, request id validation | `tests/TransitPass.BuildingBlocks.Tests/` |
-| The deploy scripts parse (`bash -n` / `sh -n`) and pass `shellcheck` | CI job "Shell scripts" |
+| The deploy scripts parse (`bash -n` / `sh -n`) and pass `shellcheck`; `demo.sh` against a stack that is not running fails loudly (exit 1, "not ready") | CI job "Shell scripts" |
 | The whole journey through the gateway: sign-up → top-up (webhook twice) → buy (and replay) → QR → tap in (and a copy refused) → tap out with a surcharge → history → balance == SUM(ledger) | `deploy/demo.sh` (live, by hand) |
 
 ## 🔌 API overview

@@ -87,6 +87,26 @@ taka() { python3 -c 'import sys; p = int(sys.argv[1]); print(f"৳{p // 100:,}.{
 
 printf '%sTransitPass demo%s against %s\n' "$B" "$N" "$BASE"
 
+# Right after `docker compose up -d` the containers run but the services may still be starting, and the gateway
+# answers 502/503 for them (000 = the gateway itself is not up yet). Wait up to WAIT_SECONDS for every service to
+# answer anything else, then start. Probes: Network's station list, Core's gate JWKS, and Identity's login route
+# (a GET there is 405 from Identity itself, so any 4xx means the service is up).
+wait_for_stack() {
+  local deadline=$((SECONDS + ${WAIT_SECONDS:-60})) path code pending
+  while :; do
+    pending=
+    for path in /api/v1/network/stations /api/v1/identity/sessions /api/v1/gate/.well-known/jwks.json; do
+      code=$(curl -s -o /dev/null -m 5 -w '%{http_code}' "$BASE$path" || true)
+      case $code in 000 | 5??) pending="$pending $path ($code)" ;; esac
+    done
+    [ -z "$pending" ] && return 0
+    [ "$SECONDS" -lt "$deadline" ] || fail "the stack is not ready after ${WAIT_SECONDS:-60} s:$pending (is it up? docker compose ps)"
+    printf '    %swaiting for:%s%s\n' "$D" "$pending" "$N"
+    sleep 2
+  done
+}
+wait_for_stack
+
 step "The gateway is up (Network service lists the stations)"
 call 200 GET /api/v1/network/stations
 ok "stations: $(json '", ".join(s["id"] for s in j)')"

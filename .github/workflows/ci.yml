@@ -87,3 +87,15 @@ jobs:
 
       - name: shellcheck
         run: shellcheck deploy/*.sh deploy/postgres/*.sh
+
+      # No stack runs in CI, so this checks the other half of "fails loudly": with nothing listening, demo.sh must
+      # wait briefly, then exit 1 with "not ready" (and never print "Demo passed").
+      - name: demo.sh fails loudly without a stack
+        run: |
+          ./deploy/dev-secrets.sh
+          if out=$(GATEWAY_URL=http://127.0.0.1:9 WAIT_SECONDS=2 ./deploy/demo.sh 2>&1); then
+            echo "$out"; echo "demo.sh passed with no stack running"; exit 1
+          fi
+          echo "$out"
+          echo "$out" | grep -q "not ready"
+          ! echo "$out" | grep -q "Demo passed"
