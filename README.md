@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-352%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-374%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -100,6 +100,7 @@ TransitPass started from studying an open-source student metro ticketing project
 - **Exit:** fare from the **entry station to the exit station** (Network, outside the transaction). More than the ticket's fare → the difference is charged as a `Surcharge` ledger row; a shorter trip gets no refund. One transaction: ticket `InJourney → Used`, journey `Completed`, wallet debit, always locked in the order **ticket → journey → wallet**
 - **Can't pay the extra → `422 gate.insufficient_funds`**, the gate stays closed and the ticket stays `InJourney`; after a top-up the next tap opens it. Someone inside at midnight can still leave: exits accept a QR up to 3 h past its expiry (`Gate__ExitGracePeriod`)
 - **Every tap is idempotent:** the gate makes a `tapId` per physical tap; the decision (open or refused) is stored in `gate_taps` and a resent `tapId` gets the same answer with `Idempotent-Replayed: true`. The same `tapId` for a different tap → `422 gate.tap_reused`
+- **Expired tickets refund themselves:** a background job in Core (every minute, `Jobs__ExpiryInterval`) finds `Active` tickets past their service day on the partial index `ix_tickets_active_expiry`, marks them `Expired` and credits the full fare back as a `Refund` ledger row. Batches of 100 in one transaction each, locked with `FOR UPDATE SKIP LOCKED`, so **every Core replica can run it** with no leader: each takes different tickets, and a ticket is refunded once (guarded `UPDATE … WHERE status = 'Active'` + one `Refund` row per ticket). One bad row is rolled back alone (a savepoint) and retried next run; the rest of the batch goes on. `Jobs__ExpiryEnabled=false` turns it off
 - **One QR, one ride:** 20 taps of the same QR at four gates at once → one entry; two exits at once → one exit and one surcharge; entry racing a cancel → exactly one winner. `deploy/gate-tap.sh` plays a gate locally
 
 **🛠️ Engineering**
@@ -270,7 +271,7 @@ erDiagram
 
 - 🎟️ A QR credential is **stateless**: it is signed on request and never stored, so it needs no table. Whether it may still be used is decided by `tickets.status`, which only a gate's guarded `UPDATE` moves.
 
-- 🧩 `ix_tickets_active_expiry` is partial too: only `Active` tickets are in it, so the expiry job (Phase 13) reads a small index however many old tickets pile up.
+- 🧩 `ix_tickets_active_expiry` is partial too: only `Active` tickets are in it, so the expiry job reads a small index however many old tickets pile up. Its query (`WHERE status = 'Active' AND expires_at <= now ORDER BY expires_at LIMIT 100`) matches the index's filter and order, so the oldest due tickets come straight off it. An expired ticket no longer matches the filter, so the index never grows with history (its old entry is cleaned up by vacuum).
 
 - 🚇 `ux_journeys_ticket_id` makes "a single-journey ticket rides once" a database fact, and is also the index the exit uses to find the open journey. `ux_ledger_entries_surcharge_ref` allows at most one `Surcharge` row per ticket.
 - 🧾 `gate_taps.tap_id` is the primary key, so a resent tap collides there (`INSERT … ON CONFLICT DO NOTHING`) and gets the stored decision back.
@@ -335,6 +336,7 @@ erDiagram
 │           ├── Tickets/                          Ticket (state + snapshot), TicketPurchase, TicketCancellation, list/buy/get/cancel
 │           ├── Credentials/                      QrKeys, TicketCredentialIssuer (ES256 JWS), TicketCredentialVerifier, QR + JWKS endpoints
 │           ├── Gates/                            GateDevices (hashed keys), Journey, GateTap, GateTaps (entry/exit), POST /gate/taps
+│           ├── Jobs/                             ExpiryOptions, TicketExpiry (SKIP LOCKED batches + refunds), TicketExpiryWorker (BackgroundService)
 │           ├── Idempotency/                      IdempotencyRecord (per-user key, request hash, stored answer)
 │           └── Data/                             DbContext, migrations
 ├── tests/                                        one test project per service + building blocks + gateway
@@ -378,6 +380,8 @@ erDiagram
 | `GATE_<STATION>_KEY` | `deploy/gate-tap.sh` (the gate's side) | Each local gate's random key (`openssl rand -hex 32`). Never given to Core |
 | `GATE_<STATION>_KEY_SHA256` → `Gate__Devices__N__KeySha256` | Compose → Core | The SHA-256 (hex) of that key. With `Gate__Devices__N__Id` and `Gate__Devices__N__Station` it enrolls one gate. A malformed or duplicate entry stops Core at startup |
 | `Gate__ExitGracePeriod` | Core | How long after its ticket's service day a QR still opens an exit gate (default `03:00:00`) |
+| `Jobs__ExpiryEnabled` | Core | Run the ticket expiry job (default `true`; tests turn it off and run it themselves) |
+| `Jobs__ExpiryInterval`, `Jobs__ExpiryBatchSize` | Core | Time between runs (default `00:01:00`, 100 ms to 1 day) and tickets per transaction (default `100`, 1–1000). A bad value stops Core at startup |
 | `Services__NetworkUrl` | Core | Base URL of the Network service for fare quotes (default `http://localhost:5102/`; `http://network:8080/` in Compose) |
 | `RateLimiting__TokenLimit`, `RateLimiting__TokensPerPeriod` | gateway | Rate-limit bucket size and refill per second |
 
@@ -482,6 +486,10 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Gate auth: wrong key, another gate's key, unknown gate, no header, a user's token → `401 gate.unauthorized`, nothing written; a gate claiming another station → `403`; malformed body → `400`; Network 404 / 5xx / refused / timeout → `404` / `503`, nothing changes, and the same `tapId` works once Network is back | `GateTapTests.cs` |
 | Gate enrollment: SHA-256 like openssl, right key → the gate and its station, wrong / missing / oversized key (even one that starts with the real key) or unknown id → refused; a bad or duplicate enrollment, the hash of an empty key, or a negative exit grace → refuse to start | `tests/TransitPass.Core.Tests/GateDevicesTests.cs` |
 | The database refuses a second `Surcharge` row, a second journey for a ticket, a half-recorded exit, an open journey with an exit, and an "allowed" tap with a refusal code | `GateTapTests.cs` |
+| Expiry job: an `Active` ticket past its day → `Expired` + one `Refund` row for its fare (pointing at the ticket); a second run finds nothing; a ticket ending exactly now expires, one a microsecond later doesn't; `Cancelled`, `Used`, `InJourney`, `Expired` tickets are never touched | `tests/TransitPass.Core.Tests/TicketExpiryTests.cs` |
+| Expiry job, one bad row: a ticket that already has a `Refund` row (the unique index refuses a second) or whose owner has no wallet stays `Active`, the rest of the batch and the next batches still expire, and it's retried next run | `TicketExpiryTests.cs` |
+| ⭐ Expiry job: 4 instances at once over 200 due tickets on 20 wallets (batches of 15) → 200 expired, exactly one refund per ticket, no deadlock, every wallet back to its balance and `SUM(ledger) == balance` | `TicketExpiryTests.cs` |
+| Expiry job: the hosted worker expires tickets on its own, comes back on its timer, stops cleanly on shutdown, does nothing when switched off; a run that fails (database down) is logged and the next one still runs, a shutdown cancel ends it and a cancelled run changes nothing; a bad interval (outside 100 ms – 1 day, which `PeriodicTimer` would refuse later) or batch size stops Core at startup; the batch query can use `ix_tickets_active_expiry`; an expired ticket can't be cancelled or shown as a QR | `TicketExpiryTests.cs` |
 | The gateway passes the `Authorization` header through unchanged, and a gate's `X-Gate-Key` and POST body to Core | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
@@ -649,8 +657,11 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - ✅ **Every path takes locks in the same order: ticket → journey → wallet** (cancel: ticket → wallet; the tap row last). A cycle needs someone to go the other way, and nobody does. Network calls happen **before** the transaction, so no lock is held during HTTP.
 - 🧪 **Proof:** 75 concurrent entries, exits with surcharges and cancels on one wallet → only `200`/`409`, every exit charged once, `SUM(ledger) == balance`; `pg_stat_database.deadlocks` stayed `0` in the live run.
 
-### Designed (next phase): jobs
-- 🔐 Background jobs use `FOR UPDATE SKIP LOCKED`, so several workers never take the same row.
+### Built: three replicas, one refund
+- 🎯 **The case:** Core runs as three replicas, and each runs the expiry job every minute. At 00:01 all three wake up and see the same 10,000 overdue tickets.
+- ❌ **The naive way** (`SELECT … WHERE status = 'Active' AND expires_at <= now`, then refund each) lets all three read the same rows: Rafi gets his ৳60 back three times. A plain `FOR UPDATE` stops the double refund but makes replicas 2 and 3 wait in line behind replica 1, so there is no sharing.
+- ✅ **TransitPass** locks a batch with `FOR UPDATE OF t SKIP LOCKED`: rows another replica holds are **skipped, not waited for**, so each replica takes a different 100. Inside the batch every ticket goes `Active → Expired` through a guarded `UPDATE … WHERE status = 'Active'`, and the refund goes through `LedgerBook` in the same transaction; `ux_ledger_entries_refund_ref` (one `Refund` row per ticket) is the last line. Refunds are posted in wallet-id order, so two replicas whose batches share wallets lock them in the same order (no deadlock). Cancel and gate entry already refuse a ticket past its day (`expires_at > now` in their guards), so they never compete with the job for the same ticket.
+- 🧪 **Proof:** 4 workers at once over 200 due tickets on 20 wallets → each refunded exactly once, `SUM(ledger) == balance` for every wallet.
 
 ## 🛡️ Security basics
 
@@ -669,6 +680,7 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - 🧾 **Payment webhooks:** HMAC-SHA256 with a shared secret from `.env`, constant-time comparison, a 5-minute replay window with the timestamp inside the MAC, a 64 KB body cap, and the body is not parsed until the signature is valid. Money is credited only by this webhook, never by the client.
 - 🎟️ **QR credentials:** signed by Core's **own** ES256 key, so a leaked login key can't mint tickets and a leaked QR key can't mint logins. Explicit `typ` (RFC 8725), separate issuer and audience, the algorithm pinned by the verifier (never taken from the header), `kid` required to match (no "try every key"), and input over 2 KB refused before parsing. The payload is signed, not encrypted: it holds only ids and station names.
 - 🚪 **Gate devices:** each gate has its own 256-bit random key; Core keeps only its SHA-256 (a fast hash is enough for random keys; slow hashing is for human passwords), compares in constant time, and answers an unknown gate exactly like a wrong key. The gate's station comes from its enrollment, never from the request. A passenger's login token can't open a gate, and a gate key can't act as a passenger.
+- ⏰ **The expiry job has no endpoint** and takes no input from anyone: it only reads `tickets` with Core's own database role, moves money only through `LedgerBook`, and a bad configuration stops Core at startup instead of running with surprising values.
 - 🧾 **Identity comes from the token only:** endpoints read the user from `sub`, so `/wallet/me` can't be pointed at someone else's wallet.
 
 ## 📌 Key decisions and trade-offs
@@ -696,7 +708,8 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 - 💳 **The payment provider is simulated** (`deploy/fake-payment.sh`). A real one (bKash, SSLCommerz) needs its own signature format and a sandbox account; the inbox, state machine and ledger stay the same.
 - ⏳ **No reconciliation job yet.** A top-up whose webhook never arrives stays `Pending`; a real system asks the provider about old pending top-ups and expires them.
 - 📒 **Single-sided ledger.** Each movement is one row on the user's wallet. Full double-entry (a matching row on a system account, so every transaction sums to zero) is not modelled yet.
-- 🎫 **Gates are online only.** A gate needs Core (and Network, for the station check and the exit fare) to open; there is no offline mode yet (the SQLite gate agent is a bonus item). Gate keys are shared secrets sent on every call (hashed at rest, TLS in production); per-gate ES256 request signing with an enrollment flow is the planned upgrade. The QR is static for the whole service day, so a screenshot works until the first scan (rotating, device-bound QR codes are a bonus item). No overstay limit: a journey left open is not closed automatically yet, and someone still inside more than 3 h after midnight can't exit with the QR (staff must help). A stored refusal is replayed for its `tapId`, so after a top-up the gate must send a new `tapId`. The gateway's rate limit is per IP, so many gates behind one station NAT share one bucket. Cancel refunds the full fare with no fee, and the ticket list can't be filtered by status yet.
+- 🎫 **Gates are online only.** A gate needs Core (and Network, for the station check and the exit fare) to open; there is no offline mode yet (the SQLite gate agent is a bonus item). Gate keys are shared secrets sent on every call (hashed at rest, TLS in production); per-gate ES256 request signing with an enrollment flow is the planned upgrade. The QR is static for the whole service day, so a screenshot works until the first scan (rotating, device-bound QR codes are a bonus item). No overstay limit: a journey left open (`InJourney`) is not closed automatically yet; the expiry job leaves it alone on purpose (the passenger rode, so no refund, and the PRD's "close at the maximum fare" job is not built), and someone still inside more than 3 h after midnight can't exit with the QR (staff must help). A stored refusal is replayed for its `tapId`, so after a top-up the gate must send a new `tapId`. The gateway's rate limit is per IP, so many gates behind one station NAT share one bucket. Cancel refunds the full fare with no fee, and the ticket list can't be filtered by status yet.
+- ⏰ **The expiry job refunds the full fare** of a ticket that never entered a gate (no fee). Its "now" is each replica's clock; a replica whose clock runs fast can expire a ticket a few seconds early (cancel and gate use the same `expires_at`, so the ticket is never both). A row that keeps failing is logged and retried every minute, with no "park after N failures" yet.
 - 🔁 **No retry or circuit breaker on the Network call,** only a 3 s timeout; a failed quote is a `503` the app can retry with the same key. Idempotency keys are kept forever for now (a cleanup job is planned).
 - 📱 **Bangladeshi mobile numbers only,** and phones are not verified (no OTP yet).
 - 🗺️ **Seed network is four stations.** Station and track changes are made through migrations, and the fare graph picks them up on restart.
@@ -723,8 +736,8 @@ Each phase is one small pull request with its own tests.
 | 10 | Ticket list and cancel with refund (ledger reversal) | ✅ #16 |
 | 11 | Signed QR credential (ES256 JWS, own key, JWKS for gates, verifier) | ✅ #17 |
 | 12 | Gate entry and exit: a journey state machine, row locks in a fixed order | ✅ #18 |
-| 13 | Background refunds for expired tickets (`SKIP LOCKED`, a partial index) | ⏳ next |
-| 14 | Demo script: sign up → top up → buy → tap in → tap out | |
+| 13 | Background refunds for expired tickets (`SKIP LOCKED`, a partial index) | ✅ #19 |
+| 14 | Demo script: sign up → top up → buy → tap in → tap out | ⏳ next |
 
 **After that:** refresh token rotation, phone OTP, Redis for rate limits and replay checks, a rotating device-bound QR code, an offline gate agent (SQLite outbox), a Next.js app and OpenTelemetry tracing.
 

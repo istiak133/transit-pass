@@ -4,6 +4,7 @@ using TransitPass.Core.Api.Credentials;
 using TransitPass.Core.Api.Data;
 using TransitPass.Core.Api.Fares;
 using TransitPass.Core.Api.Gates;
+using TransitPass.Core.Api.Jobs;
 using TransitPass.Core.Api.Payments;
 using TransitPass.Core.Api.Tickets;
 using TransitPass.Core.Api.Topups;
@@ -40,6 +41,13 @@ builder.Services.AddHttpClient<IFareQuotes, NetworkFareClient>(http =>
 });
 // The same typed client also answers "does this station exist?" for the gate.
 builder.Services.AddTransient<IStationDirectory>(sp => (NetworkFareClient)sp.GetRequiredService<IFareQuotes>());
+
+// The expiry job: every minute, Active tickets past their service day become Expired and their fare comes back.
+// Every instance runs it; FOR UPDATE SKIP LOCKED gives each one different tickets (no leader needed).
+builder.Services.AddOptions<ExpiryOptions>().Bind(builder.Configuration.GetSection(ExpiryOptions.Section))
+    .Validate(o => o.IsValid(), "Jobs:ExpiryInterval must be between 100 ms and 1 day, and Jobs:ExpiryBatchSize between 1 and 1000.")
+    .ValidateOnStart();
+builder.Services.AddHostedService<TicketExpiryWorker>();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();

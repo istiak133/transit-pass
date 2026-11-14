@@ -91,6 +91,10 @@ services:
       Gate__Devices__3__Id: gate-motijheel-1
       Gate__Devices__3__Station: motijheel
       Gate__Devices__3__KeySha256: ${GATE_MOTIJHEEL_KEY_SHA256:?run ./deploy/dev-secrets.sh first}
+      # The expiry job: every minute, Active tickets past their service day become Expired and are refunded.
+      # Safe with several Core replicas (FOR UPDATE SKIP LOCKED). Set to "false" to switch it off.
+      Jobs__ExpiryEnabled: "true"
+      Jobs__ExpiryInterval: "00:01:00"
 
   gateway:
     restart: unless-stopped
