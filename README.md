@@ -17,18 +17,74 @@
 A metro ticketing backend built around one passenger, **Rafi**: he signs up, tops up his wallet, buys a ticket from **Uttara North** to **Motijheel**, taps in at the gate, rides, and taps out.
 
 - 🏗️ **Architecture:** four .NET 10 services behind a YARP API gateway, each with its own PostgreSQL database
-- ✅ **Built so far:** the platform (gateway, rate limiting, errors, health, CI), stations, the track graph with fare quotes (Dijkstra), sign-up, login with ES256-signed JWTs, and the first protected endpoint, which Core verifies locally with Identity's public keys
-- 🛣️ **In progress:** signed QR, gates (see [Roadmap](#-roadmap))
-- 🧪 **Quality:** 237 tests, database tests against a real PostgreSQL 17 (Testcontainers), and CI with CodeQL on every pull request
+- ✅ **Built (all 15 phases):** gateway and platform, stations and fare quotes (Dijkstra), sign-up and ES256 login, wallet with an append-only ledger, top-ups through a signed webhook, ticket purchase with `Idempotency-Key`, cancel with refund, signed QR codes, gate entry and exit with surcharges, and a background job that refunds expired tickets
+- ▶️ **See it work:** [`./deploy/demo.sh`](#️-run-it-in-2-minutes) plays the whole journey through the gateway in one command
+- 🧪 **Quality:** 374 tests, database tests against a real PostgreSQL 17 (Testcontainers), races tested with up to 200 parallel requests, and CI with CodeQL and shellcheck on every pull request
 - 📚 **Decisions:** 19 [Architecture Decision Records](docs/adr/README.md) and a [PRD](docs/PRD.md)
 
 ---
 
 ## 📑 Contents
 
-[Problem](#-problem-statement) · [Features](#-features-implemented) · [Architecture](#-architecture) · [Data model](#️-data-model) · [Tech stack](#-tech-stack) · [Project structure](#-project-structure) · [Setup](#-setup) · [Tests](#-tests) · [API](#-api-overview) · [Fares](#-fare-model) · [Concurrency](#-concurrency) · [Security](#️-security-basics) · [Decisions](#-key-decisions-and-trade-offs) · [Limitations](#-known-limitations) · [Roadmap](#-roadmap) · [How it's built](#-how-its-built)
+[Pitch](#-the-2-minute-pitch) · [Run it](#️-run-it-in-2-minutes) · [Problem](#-problem-statement) · [Features](#-features-implemented) · [Architecture](#-architecture) · [Data model](#️-data-model) · [Tech stack](#-tech-stack) · [Project structure](#-project-structure) · [Setup](#-setup) · [Tests](#-tests) · [API](#-api-overview) · [Fares](#-fare-model) · [Concurrency](#-concurrency) · [Security](#️-security-basics) · [Decisions](#-key-decisions-and-trade-offs) · [Limitations](#-known-limitations) · [Roadmap](#-roadmap) · [How it's built](#-how-its-built)
 
 ---
+
+## 🎤 The 2-minute pitch
+
+TransitPass is the backend of a cashless metro ticket system for Dhaka, written in .NET 10 as four small services behind a YARP gateway, each with its own PostgreSQL database. A passenger signs up with a phone number, tops up a wallet, buys a ticket, and shows a signed QR code at the gate; the gate opens, and on the way out it charges the difference if he rode farther than he paid for. The interesting part is not the happy path but what happens when things go wrong at the same moment. Money only moves through one class that writes an append-only ledger row and changes the balance in the same transaction, with a conditional `UPDATE` so two purchases can never spend the same taka (200 parallel purchases with money for 10 give exactly 10 tickets). A phone that retries a purchase sends the same `Idempotency-Key` and gets the first answer back instead of a second charge. Top-ups are credited only by the payment provider's HMAC-signed webhook, and three guards in one transaction make a re-delivered webhook credit nothing. The QR code is an ES256 signature that anyone with Core's public key can verify, and the ticket's status column, moved by a guarded `UPDATE`, stops a screenshot of the same QR from opening a second gate. Every gate path takes row locks in the same order (ticket → journey → wallet), so there are no deadlocks. A background job refunds unused tickets after midnight, and several replicas can run it together because each takes rows with `FOR UPDATE SKIP LOCKED`. Each of these behaviours is covered by tests (374 in all; the database ones run against a real PostgreSQL 17, races with up to 200 parallel requests), and every phase was one reviewed pull request with CI and CodeQL.
+
+## ▶️ Run it in 2 minutes
+
+You need Docker (with Compose), `curl`, `openssl` and `python3`. The first image build takes a few minutes; after that the demo itself runs in a few seconds.
+
+```bash
+git clone https://github.com/istiak133/transit-pass && cd transit-pass
+./deploy/dev-secrets.sh                      # random local passwords and keys into .env (git-ignored)
+docker compose up -d --build                 # port 5432 taken? POSTGRES_HOST_PORT=55432 docker compose up -d --build
+./deploy/demo.sh                             # the whole journey, through the gateway on :5100
+```
+
+`demo.sh` registers a **new random user** every time and walks the full story in 16 numbered steps. Each call states the HTTP status it expects, and anything else stops the demo with the response body, so a green run is a real end-to-end check:
+
+| # | Step | What it proves |
+|---|---|---|
+| 1 | List stations | the gateway routes to Network |
+| 2–3 | Sign up with a random phone, log in | phone stored as E.164; an ES256 JWT comes back |
+| 4–5 | Wallet without a token, then with one | `401 auth.unauthenticated`; a new wallet at ৳0 |
+| 6–7 | Create a ৳500 top-up, then the provider's signed webhook, sent twice | `Pending` until the webhook; `applied`, then `duplicate`; balance ৳500, credited once |
+| 8 | Fare quote Uttara North → Agargaon | 9,000 m, ৳60 |
+| 9–10 | Buy the ticket with an `Idempotency-Key`, then send the same request again | `201`; the retry is `201` with `Idempotent-Replayed: true`, the same ticket, one charge |
+| 11 | Get the QR credential | an ES256 JWS (header and claims printed), and the gate JWKS |
+| 12–13 | Tap in at Uttara North, then the same QR again | `gate.entered`; the copy gets `409 gate.already_inside` |
+| 14 | Tap out at Motijheel, farther than paid for | `gate.exited`, ticket `Used`, surcharge ৳40 = ৳100 − ৳60 |
+| 15 | Ticket list and wallet history | one `Used` ticket; `TopUp +50000`, `Purchase −6000`, `Surcharge −4000` |
+| 16 | The books | balance == SUM of every ledger row (paged through the API) == 50000 − 6000 − 4000 |
+
+The last lines of a real run:
+
+```
+14. Tap out farther than paid for, at motijheel
+    GET /api/v1/network/fares/quote?from=uttara-north&to=motijheel → 200
+    POST /api/v1/gate/taps → 200
+    ✓ gate opens, ticket Used, surcharge ৳40.00 (4000 poisha) = ৳100.00 (10000 poisha) − ৳60.00 (6000 poisha)
+
+15. History: my tickets and my wallet transactions (newest first)
+    ticket 01a1d9b1-1c6e-7bb0-b61b-8d1f657f69e8  uttara-north → agargaon    6000 poisha  Used
+    2026-11-14T10:53:46  Surcharge    -4000 poisha  ref 01a1d9b1-1c6e-7bb0-b61b-8d1f657f69e8
+    2026-11-14T10:53:45  Purchase     -6000 poisha  ref 01a1d9b1-1c6e-7bb0-b61b-8d1f657f69e8
+    2026-11-14T10:53:45  TopUp       +50000 poisha  ref 01a1d9b1-1aac-7b13-9e3a-13ea8d95408b
+
+16. The books balance: wallet balance == SUM of every ledger row (paged through the API)
+    ✓ balance ৳400.00 (40000 poisha) == SUM of 3 ledger rows ৳400.00 (40000 poisha) == 50000 − 6000 − 4000
+
+Demo passed: 16 steps, user 01771722156, ticket 01a1d9b1-1c6e-7bb0-b61b-8d1f657f69e8.
+```
+
+- 🔑 The demo plays the payment provider and the gates too: it signs the webhook with `PAYMENT_WEBHOOK_SECRET` and sends each gate's own key (`GATE_<STATION>_KEY`) from `.env`, exactly as `deploy/fake-payment.sh` and `deploy/gate-tap.sh` do.
+- ⏱️ Run it straight after `docker compose up -d`: the demo first waits (up to 60 s, `WAIT_SECONDS` to change it) until the gateway reaches Identity, Network and Core, and stops with a clear message if they never come up.
+- 🌐 Another address? `GATEWAY_URL=http://host:5100 ./deploy/demo.sh`.
+- 🌙 A ticket that is never used comes back by itself: after Dhaka midnight the expiry job marks it `Expired` and a `Refund` row appears in the history.
 
 ## 🎯 Problem statement
 
@@ -112,12 +168,14 @@ TransitPass started from studying an open-source student metro ticketing project
 
 ```mermaid
 flowchart LR
-    C["Client<br/>(app, gate, curl)"] -->|HTTPS| G["Gateway · YARP :5100<br/>routing · rate limit · request id"]
+    C["Passenger app / curl<br/>(Bearer JWT)"] -->|HTTPS| G["Gateway · YARP :5100<br/>routing · rate limit · request id"]
+    D["Gate device<br/>(X-Gate-Key + QR)"] -->|/api/v1/gate/taps| G
+    P["Payment provider<br/>(HMAC-signed webhook)"] -->|/api/v1/payments/webhook| G
     G -->|/api/v1/identity| I["Identity service :5101<br/>users · passwords · ES256 JWT · JWKS"]
     G -->|/api/v1/network| N["Network service :5102<br/>stations · track graph · fares"]
-    G -->|/api/v1/wallet · tickets · gate| T["Transit Core :5103<br/>verifies JWT · wallet · ledger · top-ups · tickets<br/>(next: gate)"]
+    G -->|/api/v1/wallet · tickets · gate · payments| T["Transit Core :5103<br/>verifies JWT · wallet · ledger · top-ups<br/>tickets · signed QR · gate taps · journeys<br/>expiry job (every minute, SKIP LOCKED)"]
     T -. "public keys (JWKS), cached" .-> I
-    T -. "fare quote over HTTP, 3 s timeout" .-> N
+    T -. "fare quote and station check over HTTP, 3 s timeout" .-> N
     I --> IDB[("identity_db<br/>role identity_svc")]
     N --> NDB[("network_db<br/>role network_svc")]
     T --> CDB[("core_db<br/>role core_svc")]
@@ -125,7 +183,7 @@ flowchart LR
 
 - 🧱 **Four processes, three databases.** Each service owns its data, and no service reads another's tables.
 - 💰 **Why wallet, tickets and gates share one service (Transit Core):** buying a ticket must take the money, record it in the ledger and create the ticket **all together or not at all**. Inside one database that is a single ACID transaction. Split across services, it would need sagas and compensations, for no benefit at this size. See [ADR 0019](docs/adr/0019-microservices-with-transit-core.md).
-- 🔗 **Across services there are no foreign keys.** Core will store `user_id` taken from a verified token, and copy the stations and fare into the ticket at purchase (a snapshot), so a later price change never alters an old ticket or its refund.
+- 🔗 **Across services there are no foreign keys.** Core stores the `user_id` taken from a verified token, and copies the stations and fare into the ticket at purchase (a snapshot), so a later price change never alters an old ticket or its refund.
 
 ### 🔁 One request, end to end
 
@@ -344,11 +402,15 @@ erDiagram
 │   ├── postgres/init.sh                          one database + one login role per service
 │   ├── dev-secrets.sh                            random local passwords and keys into .env (git-ignored)
 │   ├── fake-payment.sh                           plays the payment provider: signs and sends a webhook
-│   └── gate-tap.sh                               plays a gate device: sends a tap with the gate's key from .env
+│   ├── gate-tap.sh                               plays a gate device: sends a tap with the gate's key from .env
+│   └── demo.sh                                   the whole journey in one command, through the gateway
 ├── docs/
 │   ├── PRD.md                                    product requirements
 │   └── adr/                                      19 architecture decision records
-├── .github/workflows/ci.yml                      build, format, test, Docker images (+ CodeQL)
+├── .github/
+│   ├── workflows/ci.yml                          build, format, test, Docker images, shell script checks
+│   ├── workflows/codeql.yml                      CodeQL (security-and-quality), results in generated obj/ files dropped
+│   └── codeql/codeql-config.yml                  paths CodeQL ignores (obj/, bin/)
 ├── docker-compose.yml
 └── Dockerfile                                    one multi-stage image, used for every service
 ```
@@ -391,6 +453,7 @@ erDiagram
 ./deploy/dev-secrets.sh            # once
 docker compose up --build
 curl -i http://localhost:5100/health/live
+./deploy/demo.sh                   # the full journey, see "Run it in 2 minutes"
 # Port 5432 already taken? POSTGRES_HOST_PORT=55432 docker compose up --build
 ```
 
@@ -431,7 +494,8 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 ```
 
 - 🐘 Database tests use **Testcontainers**: a throwaway `postgres:17-alpine` per test class, with the real migrations applied. No mocks of the database.
-- 🤖 **CI on every pull request:** locked restore, `dotnet format --verify-no-changes`, build with warnings as errors, all tests, Docker image builds, and CodeQL. `main` is protected, so a change merges only when everything is green.
+- 🤖 **CI on every pull request:** locked restore, `dotnet format --verify-no-changes`, build with warnings as errors, all tests, Docker image builds, a syntax check and `shellcheck` of every script in `deploy/`, and CodeQL. `main` is protected, so a change merges only when the build, the tests and CodeQL are green.
+- ▶️ **End to end:** `./deploy/demo.sh` against the running Compose stack (16 steps, every status code checked, ends with balance == SUM(ledger)). It needs the whole stack, so it is run by hand before a merge, not in CI.
 
 | Requirement | Test |
 |---|---|
@@ -499,6 +563,8 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Station list (sorted) and lookup, 404 problem with `code` and `traceId`, case-sensitive ids | `tests/TransitPass.Network.Tests/StationEndpointTests.cs` |
 | The gateway routes each prefix to the right service, and rate-limits with 429 | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Result → status code mapping, cursor encoding, request id validation | `tests/TransitPass.BuildingBlocks.Tests/` |
+| The deploy scripts parse (`bash -n` / `sh -n`) and pass `shellcheck`; `demo.sh` against a stack that is not running fails loudly (exit 1, "not ready") | CI job "Shell scripts" |
+| The whole journey through the gateway: sign-up → top-up (webhook twice) → buy (and replay) → QR → tap in (and a copy refused) → tap out with a surcharge → history → balance == SUM(ledger) | `deploy/demo.sh` (live, by hand) |
 
 ## 🔌 API overview
 
@@ -534,6 +600,8 @@ curl -s "localhost:5100/api/v1/network/fares/quote?from=uttara-north&to=motijhee
 curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: application/json' \
   -d '{"phone":"01711000001","name":"Rafi","password":"s3cret-pass"}'
 # 201 {"id":"019a…","phone":"+8801711000001","name":"Rafi","createdAt":"…"}
+
+./deploy/demo.sh                                  # all of it, in order, with every status code checked
 
 ./deploy/gate-tap.sh uttara-north entry "$QR"     # the gate at Uttara North, with its key from .env
 # {"tapId":"…","allowed":true,"code":"gate.entered",…,"ticketStatus":"InJourney","surchargePoisha":0}
@@ -673,7 +741,7 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - 🪪 **Request id:** `X-Request-Id` is accepted only as a UUID and re-printed from the parsed value, so a client can't inject fake log lines (found by CodeQL, fixed in code).
 - 🔒 **Secrets:** none in the repository. Local passwords are random, in a git-ignored `.env`.
 - 🐳 **Containers** run as a non-root user, and restores are locked (`packages.lock.json`), so a build can't pull a different dependency than the one reviewed.
-- 🔍 **CodeQL** scans every pull request, and findings are fixed in code, not dismissed.
+- 🔍 **CodeQL** scans every pull request with the `security-and-quality` queries, and findings are fixed in code, not dismissed. Files the compiler and source generators write under `obj/` are left out of the results, so the alert list shows only code we wrote.
 - 🎫 **Tokens:** ES256 (ECDSA P-256). Only Identity holds the private key. Others get the public key from `/.well-known/jwks.json`, so a compromised service can verify tokens but never mint them. Tokens last 15 minutes, because a JWT can't be recalled once issued. The `kid` lets keys rotate without breaking tokens already issued.
 - 🚪 **Login hardening:** one uniform `401` with equal timing for unknown phones and wrong passwords, plus 5 attempts per minute per phone on top of the gateway's per-IP limit.
 - 🛂 **Zero trust between services:** the gateway does not verify tokens and doesn't need to be trusted. Each service verifies every request itself, so a call that skips the gateway (from inside the network) is checked just the same.
@@ -715,7 +783,8 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 - 🗺️ **Seed network is four stations.** Station and track changes are made through migrations, and the fare graph picks them up on restart.
 - 🧮 **One fare policy.** No student, off-peak or capped-day fares yet (the `IFarePolicy` seam is there).
 - 📉 **No load test yet.** Correctness under races is tested, throughput is not.
-- 🖥️ **No frontend yet.** Use `curl`, or the OpenAPI document each service exposes in Development (`/openapi/v1.json`).
+- 🖥️ **No frontend yet.** Use `./deploy/demo.sh`, `curl`, or the OpenAPI document each service exposes in Development (`/openapi/v1.json`).
+- ▶️ **The demo runs by hand, not in CI.** It needs the full Compose stack; CI checks its syntax and lints it, and builds the images, but doesn't start the stack.
 
 ## 🛣️ Roadmap
 
@@ -737,9 +806,9 @@ Each phase is one small pull request with its own tests.
 | 11 | Signed QR credential (ES256 JWS, own key, JWKS for gates, verifier) | ✅ #17 |
 | 12 | Gate entry and exit: a journey state machine, row locks in a fixed order | ✅ #18 |
 | 13 | Background refunds for expired tickets (`SKIP LOCKED`, a partial index) | ✅ #19 |
-| 14 | Demo script: sign up → top up → buy → tap in → tap out | ⏳ next |
+| 14 | README and a one-command demo (`deploy/demo.sh`): sign up → top up → buy → tap in → tap out → books balance | ✅ #20 |
 
-**After that:** refresh token rotation, phone OTP, Redis for rate limits and replay checks, a rotating device-bound QR code, an offline gate agent (SQLite outbox), a Next.js app and OpenTelemetry tracing.
+**All 15 phases are done.** **Next (bonus):** refresh token rotation, phone OTP, Redis for rate limits and replay checks, a rotating device-bound QR code, an offline gate agent (SQLite outbox), a Next.js app and OpenTelemetry tracing.
 
 ## 🧭 How it's built
 

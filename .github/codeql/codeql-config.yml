@@ -1,0 +1,8 @@
+# CodeQL settings for this repo. Only our own code is analysed: files that compilers and source generators write
+# under obj/ (regex, OpenAPI XML comments, the xUnit entry point) are not ours to fix, so they are left out.
+# For C#, which is analysed while it builds, CodeQL may still extract those files; the workflow therefore also
+# drops any result under obj/ from the SARIF before it is uploaded.
+name: TransitPass CodeQL config
+paths-ignore:
+  - '**/obj/**'
+  - '**/bin/**'
