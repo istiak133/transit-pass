@@ -57,6 +57,9 @@ public sealed class CoreFactory(PostgresFixture db) : WebApplicationFactory<Prog
         builder.UseSetting("Jwt:RequireHttps", "false");
         builder.UseSetting("Jwt:KeyRefreshMinInterval", "00:00:01"); // the library's minimum
         builder.UseSetting("Payments:WebhookSecret", WebhookSecret);
+        // The expiry job stays off: tests share one database, and a job running on its own would expire other
+        // tests' tickets under them. TicketExpiryTests runs the job itself, with its own clock.
+        builder.UseSetting("Jobs:ExpiryEnabled", "false");
         for (int i = 0; i < GateStations.Length; i++)
         {
             // Enrolled the way production is: id, station and only the SHA-256 of the key.
