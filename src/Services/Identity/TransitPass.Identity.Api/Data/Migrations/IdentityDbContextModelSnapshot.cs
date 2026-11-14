@@ -22,6 +22,72 @@ namespace TransitPass.Identity.Api.Data.Migrations
 
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("TransitPass.Identity.Api.Sessions.RefreshToken", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("expires_at");
+
+                    b.Property<Guid>("FamilyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("family_id");
+
+                    b.Property<Guid?>("ReplacedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("replaced_by");
+
+                    b.Property<DateTimeOffset?>("RevokedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at");
+
+                    b.Property<byte[]>("TokenHash")
+                        .IsRequired()
+                        .HasColumnType("bytea")
+                        .HasColumnName("token_hash");
+
+                    b.Property<DateTimeOffset?>("UsedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("used_at");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_refresh_tokens");
+
+                    b.HasIndex("FamilyId")
+                        .HasDatabaseName("ix_refresh_tokens_family_id");
+
+                    b.HasIndex("ReplacedBy")
+                        .IsUnique()
+                        .HasDatabaseName("ux_refresh_tokens_replaced_by");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique()
+                        .HasDatabaseName("ux_refresh_tokens_token_hash");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_refresh_tokens_user_id");
+
+                    b.ToTable("refresh_tokens", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_refresh_tokens_expires_after_created", "expires_at > created_at");
+
+                            t.HasCheckConstraint("ck_refresh_tokens_token_hash_sha256", "octet_length(token_hash) = 32");
+
+                            t.HasCheckConstraint("ck_refresh_tokens_used_has_successor", "(used_at IS NULL) = (replaced_by IS NULL)");
+                        });
+                });
+
             modelBuilder.Entity("TransitPass.Identity.Api.Users.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -61,6 +127,29 @@ namespace TransitPass.Identity.Api.Data.Migrations
                         {
                             t.HasCheckConstraint("ck_users_phone_e164", "phone ~ '^\\+[1-9][0-9]{7,14}$'");
                         });
+                });
+
+            modelBuilder.Entity("TransitPass.Identity.Api.Sessions.RefreshToken", b =>
+                {
+                    b.HasOne("TransitPass.Identity.Api.Sessions.RefreshToken", null)
+                        .WithMany()
+                        .HasForeignKey("FamilyId")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .IsRequired()
+                        .HasConstraintName("fk_refresh_tokens_family_id");
+
+                    b.HasOne("TransitPass.Identity.Api.Sessions.RefreshToken", null)
+                        .WithOne()
+                        .HasForeignKey("TransitPass.Identity.Api.Sessions.RefreshToken", "ReplacedBy")
+                        .OnDelete(DeleteBehavior.NoAction)
+                        .HasConstraintName("fk_refresh_tokens_replaced_by");
+
+                    b.HasOne("TransitPass.Identity.Api.Users.User", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_refresh_tokens_users_user_id");
                 });
 #pragma warning restore 612, 618
         }

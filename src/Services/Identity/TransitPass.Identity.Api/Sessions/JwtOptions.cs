@@ -16,6 +16,17 @@ public sealed class JwtOptions
     public TimeSpan AccessTokenLifetime { get; set; } = TimeSpan.FromMinutes(15);
 
     /// <summary>
+    /// How long a refresh token stays valid if unused. Each refresh gives a new one with a fresh lifetime, so a
+    /// device that comes back at least every 14 days stays logged in; one idle for longer must log in again.
+    /// </summary>
+    public TimeSpan RefreshTokenLifetime { get; set; } = TimeSpan.FromDays(14);
+
+    /// <summary>Checked when Identity starts, so a typo (0, negative, "140" days) stops it at once.</summary>
+    internal bool IsValid() =>
+        AccessTokenLifetime > TimeSpan.Zero && AccessTokenLifetime <= TimeSpan.FromHours(1)
+        && RefreshTokenLifetime > AccessTokenLifetime && RefreshTokenLifetime <= TimeSpan.FromDays(90);
+
+    /// <summary>
     /// The ES256 private key as PKCS#8 PEM. Required outside Development; supply it through user secrets
     /// or an environment variable, never in appsettings.json. Empty in Development means "generate one at startup".
     /// </summary>

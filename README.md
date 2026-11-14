@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-374%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-407%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -18,8 +18,9 @@ A metro ticketing backend built around one passenger, **Rafi**: he signs up, top
 
 - 🏗️ **Architecture:** four .NET 10 services behind a YARP API gateway, each with its own PostgreSQL database
 - ✅ **Built (all 15 phases):** gateway and platform, stations and fare quotes (Dijkstra), sign-up and ES256 login, wallet with an append-only ledger, top-ups through a signed webhook, ticket purchase with `Idempotency-Key`, cancel with refund, signed QR codes, gate entry and exit with surcharges, and a background job that refunds expired tickets
+- ➕ **Bonus built:** refresh token rotation with reuse detection (a stolen refresh token ends the whole login)
 - ▶️ **See it work:** [`./deploy/demo.sh`](#️-run-it-in-2-minutes) plays the whole journey through the gateway in one command
-- 🧪 **Quality:** 374 tests, database tests against a real PostgreSQL 17 (Testcontainers), races tested with up to 200 parallel requests, and CI with CodeQL and shellcheck on every pull request
+- 🧪 **Quality:** 407 tests, database tests against a real PostgreSQL 17 (Testcontainers), races tested with up to 200 parallel requests, and CI with CodeQL and shellcheck on every pull request
 - 📚 **Decisions:** 19 [Architecture Decision Records](docs/adr/README.md) and a [PRD](docs/PRD.md)
 
 ---
@@ -32,7 +33,7 @@ A metro ticketing backend built around one passenger, **Rafi**: he signs up, top
 
 ## 🎤 The 2-minute pitch
 
-TransitPass is the backend of a cashless metro ticket system for Dhaka, written in .NET 10 as four small services behind a YARP gateway, each with its own PostgreSQL database. A passenger signs up with a phone number, tops up a wallet, buys a ticket, and shows a signed QR code at the gate; the gate opens, and on the way out it charges the difference if he rode farther than he paid for. The interesting part is not the happy path but what happens when things go wrong at the same moment. Money only moves through one class that writes an append-only ledger row and changes the balance in the same transaction, with a conditional `UPDATE` so two purchases can never spend the same taka (200 parallel purchases with money for 10 give exactly 10 tickets). A phone that retries a purchase sends the same `Idempotency-Key` and gets the first answer back instead of a second charge. Top-ups are credited only by the payment provider's HMAC-signed webhook, and three guards in one transaction make a re-delivered webhook credit nothing. The QR code is an ES256 signature that anyone with Core's public key can verify, and the ticket's status column, moved by a guarded `UPDATE`, stops a screenshot of the same QR from opening a second gate. Every gate path takes row locks in the same order (ticket → journey → wallet), so there are no deadlocks. A background job refunds unused tickets after midnight, and several replicas can run it together because each takes rows with `FOR UPDATE SKIP LOCKED`. Each of these behaviours is covered by tests (374 in all; the database ones run against a real PostgreSQL 17, races with up to 200 parallel requests), and every phase was one reviewed pull request with CI and CodeQL.
+TransitPass is the backend of a cashless metro ticket system for Dhaka, written in .NET 10 as four small services behind a YARP gateway, each with its own PostgreSQL database. A passenger signs up with a phone number, tops up a wallet, buys a ticket, and shows a signed QR code at the gate; the gate opens, and on the way out it charges the difference if he rode farther than he paid for. The interesting part is not the happy path but what happens when things go wrong at the same moment. Money only moves through one class that writes an append-only ledger row and changes the balance in the same transaction, with a conditional `UPDATE` so two purchases can never spend the same taka (200 parallel purchases with money for 10 give exactly 10 tickets). A phone that retries a purchase sends the same `Idempotency-Key` and gets the first answer back instead of a second charge. Top-ups are credited only by the payment provider's HMAC-signed webhook, and three guards in one transaction make a re-delivered webhook credit nothing. The QR code is an ES256 signature that anyone with Core's public key can verify, and the ticket's status column, moved by a guarded `UPDATE`, stops a screenshot of the same QR from opening a second gate. Every gate path takes row locks in the same order (ticket → journey → wallet), so there are no deadlocks. A background job refunds unused tickets after midnight, and several replicas can run it together because each takes rows with `FOR UPDATE SKIP LOCKED`. Each of these behaviours is covered by tests (407 in all; the database ones run against a real PostgreSQL 17, races with up to 200 parallel requests), and every phase was one reviewed pull request with CI and CodeQL.
 
 ## ▶️ Run it in 2 minutes
 
@@ -125,6 +126,12 @@ TransitPass started from studying an open-source student metro ticketing project
 - **`/.well-known/jwks.json`** publishes the public key with a `kid` (RFC 7638 thumbprint), so other services can verify tokens without calling Identity and without the private key
 - **One answer for every failed login:** unknown phone, wrong password or a malformed phone all get the same `401`, and take the same time (a dummy PBKDF2 check runs when the phone has no account)
 - **At most 5 login attempts per minute per phone,** across formats and IPs (`429` with `Retry-After`)
+- **Refresh tokens:** login also returns an **opaque 256-bit refresh token** (14 days). The database keeps only its **SHA-256**, so a leaked table or backup holds no usable token
+- **Rotation:** `POST /api/v1/identity/sessions/refresh` trades a refresh token for a new access token **and a new refresh token** in the same family; the old one is marked used and never works again
+- **Reuse detection:** a used refresh token presented again means two parties hold it (one is a thief). Identity can't tell which, so it **revokes the whole family**, including the newest token, and both must log in again (`401 identity.refresh_token_reused`)
+- **Logout:** `POST /api/v1/identity/sessions/logout` revokes the login's whole family (`204`, again → `204`); other logins of the same user (another device) keep working
+- Every change to one family (rotate, revoke on reuse, logout) first locks the family's root row, so **two parallel refreshes with one token → exactly one succeeds**, and a logout racing a refresh never leaves a live token behind
+- Refresh and logout: at most **10 calls per minute per refresh token** (`429` with `Retry-After`); garbage tokens are refused before any database work
 
 **🎫 Transit Core service**
 - `GET /api/v1/wallet/me` is the first **protected endpoint**: `401` without a valid token, and the caller's id taken from the token's `sub` (never from the URL or the body)
@@ -171,7 +178,7 @@ flowchart LR
     C["Passenger app / curl<br/>(Bearer JWT)"] -->|HTTPS| G["Gateway · YARP :5100<br/>routing · rate limit · request id"]
     D["Gate device<br/>(X-Gate-Key + QR)"] -->|/api/v1/gate/taps| G
     P["Payment provider<br/>(HMAC-signed webhook)"] -->|/api/v1/payments/webhook| G
-    G -->|/api/v1/identity| I["Identity service :5101<br/>users · passwords · ES256 JWT · JWKS"]
+    G -->|/api/v1/identity| I["Identity service :5101<br/>users · passwords · ES256 JWT · JWKS<br/>refresh tokens (rotation, family revoke)"]
     G -->|/api/v1/network| N["Network service :5102<br/>stations · track graph · fares"]
     G -->|/api/v1/wallet · tickets · gate · payments| T["Transit Core :5103<br/>verifies JWT · wallet · ledger · top-ups<br/>tickets · signed QR · gate taps · journeys<br/>expiry job (every minute, SKIP LOCKED)"]
     T -. "public keys (JWKS), cached" .-> I
@@ -201,6 +208,8 @@ flowchart LR
 erDiagram
     STATIONS ||--o{ SEGMENTS : "station_a"
     STATIONS ||--o{ SEGMENTS : "station_b"
+    USERS ||--o{ REFRESH_TOKENS : "logs in (ON DELETE CASCADE)"
+    REFRESH_TOKENS ||--o{ REFRESH_TOKENS : "family root / replaced_by"
 
     USERS {
         uuid id PK "UUIDv7"
@@ -208,6 +217,17 @@ erDiagram
         varchar name
         varchar password_hash "PBKDF2, never plain"
         timestamptz created_at
+    }
+    REFRESH_TOKENS {
+        uuid id PK "UUIDv7"
+        uuid user_id FK "ON DELETE CASCADE"
+        uuid family_id FK "the login's first token (root)"
+        bytea token_hash UK "SHA-256, CHECK 32 bytes"
+        timestamptz created_at
+        timestamptz expires_at "CHECK > created_at"
+        timestamptz used_at "set with replaced_by"
+        timestamptz revoked_at "logout or reuse"
+        uuid replaced_by FK "UNIQUE, the successor"
     }
     STATIONS {
         varchar id PK "slug, CHECK format"
@@ -300,13 +320,14 @@ erDiagram
     }
 ```
 
-`users` lives in `identity_db`. `stations` and `segments` live in `network_db`. `wallets`, `ledger_entries`, `topups`, `payment_events`, `tickets`, `idempotency_keys`, `journeys` and `gate_taps` live in `core_db`; `wallets.user_id` holds an Identity user id with no FK, because that table is in another database.
+`users` and `refresh_tokens` live in `identity_db`. `stations` and `segments` live in `network_db`. `wallets`, `ledger_entries`, `topups`, `payment_events`, `tickets`, `idempotency_keys`, `journeys` and `gate_taps` live in `core_db`; `wallets.user_id` holds an Identity user id with no FK, because that table is in another database.
 
 ### 📋 Tables
 
 | Table | Database | What it holds | Keys, constraints and indexes |
 |---|---|---|---|
 | `users` | identity_db | One row per passenger: phone, name, password hash | `pk_users (id)` · `ux_users_phone` unique · `ck_users_phone_e164` CHECK `^\+[1-9][0-9]{7,14}$` |
+| `refresh_tokens` | identity_db | One row per refresh token ever issued: its SHA-256, its login (family), when it was used, revoked, and what replaced it | `pk_refresh_tokens (id)` · `ux_refresh_tokens_token_hash` unique · `fk_refresh_tokens_users_user_id` CASCADE · `fk_refresh_tokens_family_id` → `refresh_tokens(id)` · `fk_refresh_tokens_replaced_by` → `refresh_tokens(id)` · `ux_refresh_tokens_replaced_by` unique · `ix_refresh_tokens_family_id` · `ix_refresh_tokens_user_id` · `ck_refresh_tokens_token_hash_sha256` CHECK `octet_length(token_hash) = 32` · `ck_refresh_tokens_expires_after_created` · `ck_refresh_tokens_used_has_successor` CHECK `(used_at IS NULL) = (replaced_by IS NULL)` |
 | `stations` | network_db | The stations, with readable ids like `agargaon` | `pk_stations (id)` · `ux_stations_name` unique · `ck_stations_id_slug` CHECK |
 | `segments` | network_db | One row per stretch of track and its length | `pk_segments (station_a, station_b)` · 2 FKs → `stations` with `ON DELETE RESTRICT` · `ck_segments_canonical_order` CHECK `station_a < station_b` (byte collation) · `ck_segments_distance_positive` · `ix_segments_station_b` |
 | `wallets` | core_db | One wallet per user and its current balance (a cache of the ledger sum) | `pk_wallets (id)` · `ux_wallets_user_id` unique · `ck_wallets_balance_non_negative` CHECK `balance_poisha >= 0` |
@@ -322,6 +343,8 @@ erDiagram
 - 🕒 Times are `timestamptz` (stored in UTC). User ids are **UUIDv7**: unique without coordination, and time-ordered, so new rows land at the right edge of the B+ tree index.
 - ↔️ Track runs both ways, so each stretch is stored **once**. The canonical-order CHECK blocks both reversed duplicates and self-loops. It compares bytes (`COLLATE "C"`), because a language-aware collation can ignore hyphens and disagree with C#'s ordinal order.
 - 📇 PostgreSQL does not index foreign key columns, so `ix_segments_station_b` exists. `station_a` is already covered as the first column of the primary key.
+
+- 🔁 A login's refresh tokens form a **chain**: the first one is the family **root** (`family_id = id`), and each refresh adds a successor (`replaced_by`). The two self-referencing FKs are `NO ACTION`, not `RESTRICT`: PostgreSQL checks `NO ACTION` at the end of the statement, so deleting a user can cascade through a whole family (root and children together) in one `DELETE`.
 
 - 📇 `ix_ledger_entries_wallet_id_id` does two jobs: it serves the history page (`WHERE wallet_id = … AND id < cursor ORDER BY id DESC`, an *Index Scan Backward*) and it indexes the foreign key.
 
@@ -378,7 +401,7 @@ erDiagram
 │   └── Services/
 │       ├── Identity/TransitPass.Identity.Api/
 │       │   ├── Users/                            User, mapping, PhoneNumber, PasswordHasher, register endpoint
-│       │   ├── Sessions/                         ES256 SigningKey, TokenIssuer, LoginThrottle, login + JWKS endpoints
+│       │   ├── Sessions/                         ES256 SigningKey, TokenIssuer, Login/RefreshThrottle, RefreshToken + RefreshTokens (rotation, family revoke), login/refresh/logout + JWKS endpoints
 │       │   └── Data/                             DbContext, migrations
 │       ├── Network/TransitPass.Network.Api/
 │       │   ├── Stations/                         Station, mapping, endpoints
@@ -436,6 +459,7 @@ erDiagram
 | `Database__MigrateOnStartup` | each service | Apply migrations on start (`true` in Development only) |
 | `Jwt__JwksUrl`, `Jwt__RequireHttps` | Core (any verifying service) | Where Identity's public keys are, and whether to insist on HTTPS (off inside the private Compose network) |
 | `JWT_SIGNING_KEY_PEM` → `Jwt__SigningKeyPem` | Compose → Identity | ES256 private key (EC P-256, PKCS#8 PEM). Required outside Development; generated by `dev-secrets.sh` |
+| `Jwt__AccessTokenLifetime`, `Jwt__RefreshTokenLifetime` | Identity | Access token lifetime (default `00:15:00`, at most 1 hour) and refresh token lifetime (default `14.00:00:00`, longer than the access token and at most 90 days). A bad value stops Identity at startup |
 | `QR_SIGNING_KEY_PEM` → `Qr__SigningKeyPem` | Compose → Core | Core's own ES256 private key for ticket QR credentials (EC P-256 PEM), separate from Identity's. Required outside Development; generated by `dev-secrets.sh` |
 | `Qr__RetiredPublicKeyPems__0`, `__1`, … | Core | Optional: public keys of earlier QR keys, kept in the JWKS after a rotation so QR codes already issued keep verifying |
 | `PAYMENT_WEBHOOK_SECRET` → `Payments__WebhookSecret` | Compose → Core | HMAC secret shared with the payment provider (at least 32 characters). Required outside Development; generated by `dev-secrets.sh` |
@@ -510,6 +534,12 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Wrong password, unknown phone and a malformed phone get the identical `401` | `SessionEndpointTests.cs` |
 | The 6th login attempt in a minute for one phone is `429`, even with mixed formats and the right password | `SessionEndpointTests.cs` |
 | JWKS never contains the private `d`; production refuses to start without a key; one PEM gives one `kid`; non-P-256 keys are rejected | `SessionEndpointTests.cs`, `SigningKeyTests.cs` |
+| Login returns a 43-character opaque refresh token; the row holds only `SHA-256(bytes)` (family root, 14 days), and the token text appears in no column in any encoding; the database refuses a 43-byte value where the 32-byte hash belongs | `tests/TransitPass.Identity.Tests/RefreshTokenTests.cs` |
+| Refresh rotates: new access token (same `sub`) and new refresh token in the same family; the old row gets `used_at` and `replaced_by` | `RefreshTokenTests.cs` |
+| Reusing the first or a middle token → `401 identity.refresh_token_reused`, and every token of the family (the newest too) is revoked; another user's login is untouched; a used token that has since expired still counts as reuse | `RefreshTokenTests.cs` |
+| ⭐ 10 parallel refreshes with one token → exactly one `200`, one successor row, then the reuse rule ends the family; logout racing a refresh (8 rounds) never leaves a live token | `RefreshTokenTests.cs` |
+| Expired → `401 identity.refresh_token_expired`, nothing issued; logout → `204`, again → `204`, then refresh → `401`, and another device's login still works; unknown token → `401` | `RefreshTokenTests.cs` |
+| Garbage (short, long, padded, a JWT, non-base64url, never issued) → `401 identity.invalid_refresh_token` on refresh and logout; missing → `400`; the 11th call in a minute with one token → `429` + `Retry-After`; deleting a user deletes all their tokens; a bad lifetime stops Identity at startup | `RefreshTokenTests.cs` |
 | Core: no token → `401` problem + `WWW-Authenticate`; a valid token → `200` with the token's `sub` | `tests/TransitPass.Core.Tests/WalletAuthTests.cs` |
 | Core refuses expired, wrong-audience, wrong-issuer, unknown-key, tampered, `alg: none`, HS256, non-UUID `sub` and garbage tokens | `WalletAuthTests.cs` |
 | Keys are fetched once for many requests; a rotated key is picked up after one refresh; Identity down keeps the cached keys; 30 fake `kid`s cause at most one extra fetch | `WalletAuthTests.cs` |
@@ -554,7 +584,7 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Expiry job, one bad row: a ticket that already has a `Refund` row (the unique index refuses a second) or whose owner has no wallet stays `Active`, the rest of the batch and the next batches still expire, and it's retried next run | `TicketExpiryTests.cs` |
 | ⭐ Expiry job: 4 instances at once over 200 due tickets on 20 wallets (batches of 15) → 200 expired, exactly one refund per ticket, no deadlock, every wallet back to its balance and `SUM(ledger) == balance` | `TicketExpiryTests.cs` |
 | Expiry job: the hosted worker expires tickets on its own, comes back on its timer, stops cleanly on shutdown, does nothing when switched off; a run that fails (database down) is logged and the next one still runs, a shutdown cancel ends it and a cancelled run changes nothing; a bad interval (outside 100 ms – 1 day, which `PeriodicTimer` would refuse later) or batch size stops Core at startup; the batch query can use `ix_tickets_active_expiry`; an expired ticket can't be cancelled or shown as a QR | `TicketExpiryTests.cs` |
-| The gateway passes the `Authorization` header through unchanged, and a gate's `X-Gate-Key` and POST body to Core | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
+| The gateway passes the `Authorization` header through unchanged, a gate's `X-Gate-Key` and POST body to Core, and the refresh/logout body to Identity | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
 | Fare quotes end to end, and 400 / 404 / 422 problems with their codes | `tests/TransitPass.Network.Tests/FareEndpointTests.cs`, `RouteGraphTests.cs` |
@@ -578,7 +608,9 @@ All paths go through the gateway at `http://localhost:5100`.
 | GET | `/api/v1/network/stations/{id}` | One station, or `404 station.not_found` |
 | GET | `/api/v1/network/fares/quote?from=&to=` | `{ from, to, distanceM, farePoisha }` for the shortest track distance |
 | POST | `/api/v1/identity/users` | Sign up `{ phone, name, password }` → `201 Created` + `Location`, body `{ id, phone, name, createdAt }` |
-| POST | `/api/v1/identity/sessions` | Log in `{ phone, password }` → `200 { accessToken, tokenType: "Bearer", expiresIn: 900, expiresAt }` |
+| POST | `/api/v1/identity/sessions` | Log in `{ phone, password }` → `200 { accessToken, tokenType: "Bearer", expiresIn: 900, expiresAt, refreshToken, refreshTokenExpiresAt }` |
+| POST | `/api/v1/identity/sessions/refresh` | `{ refreshToken }` → `200` with the same shape as login: a new access token **and a new refresh token** (keep only the newest). Used token again → `401 identity.refresh_token_reused` and the login is ended; expired → `401 identity.refresh_token_expired`; unknown, revoked or garbage → `401 identity.invalid_refresh_token` |
+| POST | `/api/v1/identity/sessions/logout` | `{ refreshToken }` (any token of the login) → `204`, the login's whole refresh family revoked; again → `204`; unknown → `401` |
 | GET | `/.well-known/jwks.json` (Identity, internal) | The public signing key(s) as a JWK set, `Cache-Control: max-age=300` |
 | GET | `/api/v1/wallet/me` 🔒 | `Authorization: Bearer <token>` → `200 { walletId, userId, balancePoisha, currency }` (created on first visit); no or bad token → `401 auth.unauthenticated` |
 | POST | `/api/v1/wallet/topups` 🔒 | `{ amountPoisha }` (1000–5000000) → `201` + `Location`, `{ id, amountPoisha, status: "Pending", createdAt, completedAt, checkoutUrl }` |
@@ -601,6 +633,10 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
   -d '{"phone":"01711000001","name":"Rafi","password":"s3cret-pass"}'
 # 201 {"id":"019a…","phone":"+8801711000001","name":"Rafi","createdAt":"…"}
 
+curl -s -X POST localhost:5100/api/v1/identity/sessions/refresh -H 'content-type: application/json' \
+  -d "{\"refreshToken\":\"$REFRESH\"}"
+# 200 {"accessToken":"eyJ…","tokenType":"Bearer","expiresIn":900,…,"refreshToken":"<a new one>",…}
+
 ./deploy/demo.sh                                  # all of it, in order, with every status code checked
 
 ./deploy/gate-tap.sh uttara-north entry "$QR"     # the gate at Uttara North, with its key from .env
@@ -621,12 +657,12 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 | Status | When | Codes so far |
 |---|---|---|
 | `400` | The request is invalid | `fare.invalid_request`, `fare.same_station`, `user.invalid_phone`, `user.invalid_name`, `user.invalid_password`, `identity.invalid_request`, `pagination.invalid_cursor`, `topup.invalid_amount`, `payment.invalid_event`, `payment.body_too_large`, `ticket.invalid_request`, `idempotency.key_required`, `idempotency.invalid_key`, `gate.invalid_request` |
-| `401` | Login failed (always the same answer), no or bad access token (`WWW-Authenticate: Bearer`), or an unknown gate / wrong gate key | `identity.invalid_credentials`, `auth.unauthenticated`, `payment.invalid_signature`, `gate.unauthorized` |
+| `401` | Login failed (always the same answer), a refresh token that is unknown, revoked, expired or reused, no or bad access token (`WWW-Authenticate: Bearer`), or an unknown gate / wrong gate key | `identity.invalid_credentials`, `identity.invalid_refresh_token`, `identity.refresh_token_expired`, `identity.refresh_token_reused`, `auth.unauthenticated`, `payment.invalid_signature`, `gate.unauthorized` |
 | `403` | Authenticated, but not allowed: a gate claiming another station, or a passenger's QR the gate refuses | `auth.forbidden` (no user route needs it: someone else's data answers `404`, so ids can't be probed), `gate.wrong_station`, `credential.invalid`, `credential.expired` |
 | `404` | It doesn't exist (or isn't yours) | `station.not_found`, `topup.not_found`, `payment.unknown_topup`, `ticket.not_found` |
 | `409` | It conflicts with what's already there | `user.phone_taken`, `idempotency.in_progress`, `ticket.not_cancellable`, `ticket.expired`, `ticket.not_usable`, `gate.already_inside`, `gate.not_inside`, `gate.already_exited`, `gate.tap_in_progress` |
 | `422` | Valid request, but a business rule says no | `fare.no_route`, `payment.amount_mismatch`, `wallet.insufficient_funds`, `idempotency.key_reused`, `gate.insufficient_funds`, `gate.tap_reused` |
-| `429` | Too many requests | gateway limit per IP; `identity.too_many_attempts` (5 logins per minute per phone), both with `Retry-After` |
+| `429` | Too many requests | gateway limit per IP; `identity.too_many_attempts` (5 logins per minute per phone; 10 refresh/logout calls per minute per refresh token), all with `Retry-After` |
 | `503` | A dependency is down: the database (`/health/ready`), or Network during a purchase or a gate tap | `network.unavailable` |
 
 ## 💰 Fare model
@@ -731,6 +767,12 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - ✅ **TransitPass** locks a batch with `FOR UPDATE OF t SKIP LOCKED`: rows another replica holds are **skipped, not waited for**, so each replica takes a different 100. Inside the batch every ticket goes `Active → Expired` through a guarded `UPDATE … WHERE status = 'Active'`, and the refund goes through `LedgerBook` in the same transaction; `ux_ledger_entries_refund_ref` (one `Refund` row per ticket) is the last line. Refunds are posted in wallet-id order, so two replicas whose batches share wallets lock them in the same order (no deadlock). Cancel and gate entry already refuse a ticket past its day (`expires_at > now` in their guards), so they never compete with the job for the same ticket.
 - 🧪 **Proof:** 4 workers at once over 200 due tickets on 20 wallets → each refunded exactly once, `SUM(ledger) == balance` for every wallet.
 
+### Built: the stolen refresh token
+- 🎯 **The case:** malware copies Rafi's refresh token. Later both the thief and Rafi's app use it, or Rafi's app fires two refreshes at the same instant, or he taps "Log out" while a refresh is running.
+- ❌ **The naive way** (a long-lived refresh token, checked with a `SELECT`) lets the thief refresh for weeks alongside Rafi, and two parallel refreshes both pass the check and both get a new token.
+- ✅ **TransitPass rotates and watches for reuse.** Each token works once: the refresh marks it used (`UPDATE … SET used_at WHERE used_at IS NULL AND revoked_at IS NULL`) and issues its successor in the same family. A used token coming back means two parties hold it, so the whole family is revoked: the thief's newest token dies too. Every rotate, reuse-revoke and logout first locks the family's **root row** (`SELECT … FOR UPDATE`), so one family's changes run one at a time. Without that lock a logout's `UPDATE` could miss a successor a parallel refresh inserted after the `UPDATE` took its snapshot.
+- 🧪 **Proof:** 10 parallel refreshes with one token → exactly one `200` and one successor row; reuse of an old token → `401` and the newest token is dead too; logout racing a refresh, 8 rounds → never a live token left.
+
 ## 🛡️ Security basics
 
 - 🔑 **Passwords:** PBKDF2-HMAC-SHA256, 600,000 iterations, a 16-byte random salt per user, and `FixedTimeEquals` for comparison. Never returned by the API, never logged. Limited to 8–128 characters, because PBKDF2 cost grows with the input and an unbounded password is a cheap way to slow the server down.
@@ -744,6 +786,7 @@ curl -s -X POST localhost:5100/api/v1/identity/users -H 'content-type: applicati
 - 🔍 **CodeQL** scans every pull request with the `security-and-quality` queries, and findings are fixed in code, not dismissed. Files the compiler and source generators write under `obj/` are left out of the results, so the alert list shows only code we wrote.
 - 🎫 **Tokens:** ES256 (ECDSA P-256). Only Identity holds the private key. Others get the public key from `/.well-known/jwks.json`, so a compromised service can verify tokens but never mint them. Tokens last 15 minutes, because a JWT can't be recalled once issued. The `kid` lets keys rotate without breaking tokens already issued.
 - 🚪 **Login hardening:** one uniform `401` with equal timing for unknown phones and wrong passwords, plus 5 attempts per minute per phone on top of the gateway's per-IP limit.
+- 🔁 **Refresh tokens:** 256 bits from the OS random generator, opaque (no data inside), stored only as SHA-256 (a fast hash is right for random tokens; slow hashing is for human passwords), one use each, family revoked on reuse (OAuth 2.0 Security BCP, RFC 9700), 14 days, and at most 10 refresh/logout calls per minute per token. They travel in the JSON body, not a cookie, so Identity has no cookie-based endpoint for CSRF to target; the planned Next.js app keeps the token in its own server (BFF) as an `HttpOnly; Secure; SameSite=Strict` cookie and the browser never sees it ([ADR 0011](docs/adr/0011-identity-and-sessions.md)).
 - 🛂 **Zero trust between services:** the gateway does not verify tokens and doesn't need to be trusted. Each service verifies every request itself, so a call that skips the gateway (from inside the network) is checked just the same.
 - 🧾 **Payment webhooks:** HMAC-SHA256 with a shared secret from `.env`, constant-time comparison, a 5-minute replay window with the timestamp inside the MAC, a 64 KB body cap, and the body is not parsed until the signature is valid. Money is credited only by this webhook, never by the client.
 - 🎟️ **QR credentials:** signed by Core's **own** ES256 key, so a leaked login key can't mint tickets and a leaked QR key can't mint logins. Explicit `typ` (RFC 8725), separate issuer and audience, the algorithm pinned by the verifier (never taken from the header), `kid` required to match (no "try every key"), and input over 2 KB refused before parsing. The payload is signed, not encrypted: it holds only ids and station names.
@@ -767,11 +810,13 @@ Each one has a full record in [`docs/adr`](docs/adr/README.md).
 | No auto-migration in production | A separate deploy step. In return, replicas never race to change the schema |
 | Real PostgreSQL in tests (Testcontainers) | Tests need Docker and take longer. In return constraints, SQL and races are tested for real |
 | Every change through a PR with CI and CodeQL, squash-merged into a protected `main` | Slower than pushing directly. In return every step has a reviewed record |
+| Strict refresh rotation: a reused token always revokes the family, with no grace window | Two refreshes of one token at the same instant (two tabs) end the login, so the client must refresh one at a time (the BFF does). In return a thief can never keep a session alive by racing the real user |
 | No blockchain | Considered and rejected: the threats are forgery, replay and races, which signatures, a server-side state machine, row locks and an append-only ledger solve at a fraction of the cost |
 
 ## 🚧 Known limitations
 
-- 🔐 **No refresh token yet,** so after 15 minutes the user logs in again. A token can't be revoked before it expires (no deny-list yet).
+- 🔐 **Access tokens can't be recalled.** Logout and reuse detection end the refresh family at once, but an access token already issued keeps working until it expires (at most 15 minutes): there is no `sid` claim or deny-list yet. No "log out all devices" or password change yet (each would revoke every family of the user). The refresh lifetime slides (14 days from the last refresh) with no absolute cap, and used or revoked rows are kept (no cleanup job yet).
+- 🔁 **Strict rotation needs a careful client.** Two refreshes with one token at the same instant end the login; the PRD's 10-second grace window was not built (see Decisions).
 - 🔒 **The per-phone login limit is in memory,** so it's per Identity instance and resets on restart (Redis is in the bonus list). Someone can also keep one phone's login blocked for a minute by failing on purpose: that trade buys protection from password guessing.
 - 💳 **The payment provider is simulated** (`deploy/fake-payment.sh`). A real one (bKash, SSLCommerz) needs its own signature format and a sandbox account; the inbox, state machine and ledger stay the same.
 - ⏳ **No reconciliation job yet.** A top-up whose webhook never arrives stays `Pending`; a real system asks the provider about old pending top-ups and expires them.
@@ -808,7 +853,16 @@ Each phase is one small pull request with its own tests.
 | 13 | Background refunds for expired tickets (`SKIP LOCKED`, a partial index) | ✅ #19 |
 | 14 | README and a one-command demo (`deploy/demo.sh`): sign up → top up → buy → tap in → tap out → books balance | ✅ #20 |
 
-**All 15 phases are done.** **Next (bonus):** refresh token rotation, phone OTP, Redis for rate limits and replay checks, a rotating device-bound QR code, an offline gate agent (SQLite outbox), a Next.js app and OpenTelemetry tracing.
+**All 15 phases are done.**
+
+**Bonus items**
+
+| # | Bonus | Status |
+|---|---|---|
+| 1 | Refresh token rotation with reuse detection and family revoke, logout | ✅ #21 |
+| 2 | Phone OTP | next |
+
+**Next (bonus):** phone OTP, Redis for rate limits and replay checks, a rotating device-bound QR code, an offline gate agent (SQLite outbox), a Next.js app and OpenTelemetry tracing.
 
 ## 🧭 How it's built
 

@@ -10,10 +10,13 @@ var builder = WebApplication.CreateBuilder(args);
 builder.AddServiceDefaults();
 builder.AddPostgres();
 builder.AddIdentityDatabase();
-builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.Section));
+builder.Services.AddOptions<JwtOptions>().Bind(builder.Configuration.GetSection(JwtOptions.Section))
+    .Validate(o => o.IsValid(), "Jwt:AccessTokenLifetime must be over 0 and at most 1 hour, and Jwt:RefreshTokenLifetime longer than it and at most 90 days.")
+    .ValidateOnStart();
 builder.Services.AddSingleton<SigningKey>();
 builder.Services.AddSingleton<TokenIssuer>();
 builder.Services.AddSingleton<LoginThrottle>();
+builder.Services.AddSingleton<RefreshThrottle>();
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
