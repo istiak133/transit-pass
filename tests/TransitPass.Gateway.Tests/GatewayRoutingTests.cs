@@ -61,6 +61,28 @@ public sealed class GatewayRoutingTests
         factory.ForwardedBodies.Single().ShouldBe("{\"tapId\":\"t-1\",\"direction\":\"entry\"}");
     }
 
+    [Theory]
+    [InlineData("/api/v1/identity/sessions/refresh")]
+    [InlineData("/api/v1/identity/sessions/logout")]
+    public async Task Refresh_and_logout_reach_identity_with_the_token_body_unchanged(string path)
+    {
+        // The refresh token travels in the JSON body (not a cookie), so the gateway must pass the body as is.
+        using var factory = new GatewayFactory();
+        using var client = factory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Post, path)
+        {
+            Content = JsonContent.Create(new { refreshToken = "opaque-token" }),
+        };
+
+        (await client.SendAsync(request, TestContext.Current.CancellationToken)).StatusCode.ShouldBe(HttpStatusCode.OK);
+
+        HttpRequestMessage forwarded = factory.Forwarded.Single();
+        forwarded.Method.ShouldBe(HttpMethod.Post);
+        forwarded.RequestUri!.Host.ShouldBe("identity.test");
+        forwarded.RequestUri.AbsolutePath.ShouldBe(path);
+        factory.ForwardedBodies.Single().ShouldBe("{\"refreshToken\":\"opaque-token\"}");
+    }
+
     [Fact]
     public async Task Unknown_path_is_a_problem_404_and_is_not_forwarded()
     {
