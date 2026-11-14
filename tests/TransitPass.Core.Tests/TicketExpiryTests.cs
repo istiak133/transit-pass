@@ -336,10 +336,10 @@ public sealed class TicketExpiryTests(PostgresFixture db) : IAsyncLifetime
         await using var tx = await ctx.Database.BeginTransactionAsync(Ct);
         await ctx.Database.ExecuteSqlAsync($"SET LOCAL enable_seqscan = off", Ct);
         DateTimeOffset now = Era(1990);
-        Guid[] skip = [];
+        string skip = string.Empty;
         List<string> plan = await ctx.Database.SqlQuery<string>($"""
             EXPLAIN SELECT t.id FROM tickets t LEFT JOIN wallets w ON w.user_id = t.user_id
-             WHERE t.status = 'Active' AND t.expires_at <= {now} AND NOT (t.id = ANY({skip}))
+             WHERE t.status = 'Active' AND t.expires_at <= {now} AND NOT (t.id = ANY(string_to_array({skip}, ',')::uuid[]))
              ORDER BY t.expires_at LIMIT 100 FOR UPDATE OF t SKIP LOCKED
             """).ToListAsync(Ct);
 

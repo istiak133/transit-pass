@@ -69,7 +69,9 @@ public static class TicketExpiry
         //    sorted by expires_at), so this reads the oldest due rows straight off the index: O(log n + batch).
         //    SKIP LOCKED: rows another instance (or a cancel/gate in flight) holds are passed over, never waited for.
         //    OF t: lock the tickets only; the wallet join just tells us where each refund goes.
-        Guid[] skip = [.. failed];
+        // Rows that failed earlier in this run, as one text parameter split back into uuid[] by Postgres.
+        // (Still a bound parameter, never SQL text; a string keeps the interpolation type-obvious for CodeQL.)
+        string skip = string.Join(',', failed);
         List<DueTicket> due = await db.Database
             .SqlQuery<DueTicket>($"""
                 SELECT t.id AS "Id", t.fare_poisha AS "FarePoisha", w.id AS "WalletId"
@@ -77,7 +79,7 @@ public static class TicketExpiry
                   LEFT JOIN wallets w ON w.user_id = t.user_id
                  WHERE t.status = 'Active'
                    AND t.expires_at <= {now}
-                   AND NOT (t.id = ANY({skip}))
+                   AND NOT (t.id = ANY(string_to_array({skip}, ',')::uuid[]))
                  ORDER BY t.expires_at
                  LIMIT {batchSize}
                    FOR UPDATE OF t SKIP LOCKED
