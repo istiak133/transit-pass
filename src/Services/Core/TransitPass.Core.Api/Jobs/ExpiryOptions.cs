@@ -14,7 +14,16 @@ public sealed class ExpiryOptions
     /// <summary>How many tickets one transaction locks and expires. Small enough to keep locks short.</summary>
     public int ExpiryBatchSize { get; set; } = 100;
 
-    /// <summary>The rules a valid configuration follows; checked when Core starts, so a typo stops it at once.</summary>
+    /// <summary>The shortest interval allowed. PeriodicTimer itself refuses anything under 1 ms.</summary>
+    internal static readonly TimeSpan MinInterval = TimeSpan.FromMilliseconds(100);
+
+    /// <summary>The longest interval allowed. PeriodicTimer refuses anything over about 49 days.</summary>
+    internal static readonly TimeSpan MaxInterval = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// The rules a valid configuration follows; checked when Core starts, so a typo stops it at once. The interval
+    /// range matters: a value PeriodicTimer refuses would otherwise pass startup and crash the worker a moment later.
+    /// </summary>
     internal bool IsValid() =>
-        ExpiryInterval > TimeSpan.Zero && ExpiryBatchSize is >= 1 and <= 1000;
+        ExpiryInterval >= MinInterval && ExpiryInterval <= MaxInterval && ExpiryBatchSize is >= 1 and <= 1000;
 }

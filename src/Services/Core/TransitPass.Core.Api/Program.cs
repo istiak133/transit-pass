@@ -45,7 +45,7 @@ builder.Services.AddTransient<IStationDirectory>(sp => (NetworkFareClient)sp.Get
 // The expiry job: every minute, Active tickets past their service day become Expired and their fare comes back.
 // Every instance runs it; FOR UPDATE SKIP LOCKED gives each one different tickets (no leader needed).
 builder.Services.AddOptions<ExpiryOptions>().Bind(builder.Configuration.GetSection(ExpiryOptions.Section))
-    .Validate(o => o.IsValid(), "Jobs:ExpiryInterval must be positive and Jobs:ExpiryBatchSize between 1 and 1000.")
+    .Validate(o => o.IsValid(), "Jobs:ExpiryInterval must be between 100 ms and 1 day, and Jobs:ExpiryBatchSize between 1 and 1000.")
     .ValidateOnStart();
 builder.Services.AddHostedService<TicketExpiryWorker>();
 builder.Services.AddOpenApi();

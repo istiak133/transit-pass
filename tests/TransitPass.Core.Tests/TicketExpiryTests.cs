@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using TransitPass.Core.Api.Data;
 using TransitPass.Core.Api.Jobs;
 using TransitPass.Core.Api.Ledger;
 using TransitPass.Core.Api.Tickets;
@@ -423,6 +424,8 @@ public sealed class TicketExpiryTests(PostgresFixture db) : IAsyncLifetime
     [InlineData("Jobs:ExpiryBatchSize", "1001")]
     [InlineData("Jobs:ExpiryInterval", "00:00:00")]
     [InlineData("Jobs:ExpiryInterval", "-00:01:00")]
+    [InlineData("Jobs:ExpiryInterval", "00:00:00.0005")] // PeriodicTimer refuses under 1 ms: must fail at startup, not later
+    [InlineData("Jobs:ExpiryInterval", "60.00:00:00")] // and over ~49 days
     public async Task A_bad_job_setting_stops_core_at_startup(string key, string value)
     {
         await using var bad = _factory.WithWebHostBuilder(b => b.UseSetting(key, value));
@@ -430,5 +433,61 @@ public sealed class TicketExpiryTests(PostgresFixture db) : IAsyncLifetime
         var ex = Should.Throw<OptionsValidationException>(() => _ = bad.Services);
 
         ex.Message.ShouldContain("Jobs:");
+    }
+
+    /// <summary>A worker whose database can't be reached: every run fails at the first query.</summary>
+    private static TicketExpiryWorker WorkerWithBrokenDatabase(out ServiceProvider services)
+    {
+        services = new ServiceCollection()
+            .AddDbContext<CoreDbContext>(o => o.UseNpgsql("Host=127.0.0.1;Port=1;Timeout=1;Pooling=false"))
+            .BuildServiceProvider();
+        return new TicketExpiryWorker(
+            services.GetRequiredService<IServiceScopeFactory>(), Options.Create(new ExpiryOptions()),
+            TimeProvider.System, NullLogger<TicketExpiryWorker>.Instance);
+    }
+
+    [Fact]
+    public async Task A_run_that_fails_is_logged_and_the_worker_lives_on()
+    {
+        TicketExpiryWorker worker = WorkerWithBrokenDatabase(out ServiceProvider services);
+        await using (services)
+        {
+            // Database down: the run fails, but the exception must not escape (it would stop the whole host).
+            await Should.NotThrowAsync(() => worker.RunOnceAsync(10, Ct));
+            await Should.NotThrowAsync(() => worker.RunOnceAsync(10, Ct)); // and the next tick tries again
+        }
+    }
+
+    [Fact]
+    public async Task A_run_cancelled_by_shutdown_ends_the_worker_instead_of_being_swallowed()
+    {
+        TicketExpiryWorker worker = WorkerWithBrokenDatabase(out ServiceProvider services);
+        await using (services)
+        {
+            using var shutdown = new CancellationTokenSource();
+            await shutdown.CancelAsync();
+
+            await Should.ThrowAsync<OperationCanceledException>(() => worker.RunOnceAsync(10, shutdown.Token));
+        }
+    }
+
+    [Fact]
+    public async Task A_cancelled_run_changes_nothing()
+    {
+        DateTimeOffset now = Era(1989);
+        var (userId, walletId) = await UserWith(500_00);
+        Guid ticket = await Ticket(userId, now.AddHours(-1));
+        using var shutdown = new CancellationTokenSource();
+        await shutdown.CancelAsync();
+
+        await using (var ctx = db.CreateDbContext())
+        {
+            await Should.ThrowAsync<OperationCanceledException>(
+                () => TicketExpiry.RunAsync(ctx, now, 100, NullLogger.Instance, shutdown.Token));
+        }
+
+        (await StatusOf(ticket)).ShouldBe("Active");
+        (await Books(walletId)).Refunds.ShouldBeEmpty();
+        (await RunJob(now)).ShouldBe(new ExpiryRun(1, Fare, 0)); // clean up this year
     }
 }

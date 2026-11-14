@@ -49,8 +49,10 @@ public sealed partial class TicketExpiryWorker(
                 LogRun(logger, run.Expired, run.RefundedPoisha, run.Failed);
             }
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
+            // Only shutdown may end the worker. Anything else (a timeout that surfaces as a cancellation included)
+            // is one failed run; if it escaped, the BackgroundService would end and stop the whole host.
             LogRunFailed(logger, ex);
         }
     }

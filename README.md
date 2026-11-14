@@ -3,7 +3,7 @@
 
 <p align="center">
   <a href="https://github.com/istiak133/transit-pass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/istiak133/transit-pass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"/></a>
-  <img src="https://img.shields.io/badge/tests-369%20passing-2ea44f?style=flat-square" alt="Tests"/>
+  <img src="https://img.shields.io/badge/tests-374%20passing-2ea44f?style=flat-square" alt="Tests"/>
   <img src="https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white" alt=".NET 10"/>
   <img src="https://img.shields.io/badge/ASP.NET%20Core-Minimal%20APIs-512BD4?style=flat-square" alt="ASP.NET Core"/>
   <img src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 17"/>
@@ -271,7 +271,7 @@ erDiagram
 
 - 🎟️ A QR credential is **stateless**: it is signed on request and never stored, so it needs no table. Whether it may still be used is decided by `tickets.status`, which only a gate's guarded `UPDATE` moves.
 
-- 🧩 `ix_tickets_active_expiry` is partial too: only `Active` tickets are in it, so the expiry job reads a small index however many old tickets pile up. Its query (`WHERE status = 'Active' AND expires_at <= now ORDER BY expires_at LIMIT 100`) matches the index's filter and order, so the oldest due tickets come straight off it, and an expired ticket leaves the index the moment it changes status.
+- 🧩 `ix_tickets_active_expiry` is partial too: only `Active` tickets are in it, so the expiry job reads a small index however many old tickets pile up. Its query (`WHERE status = 'Active' AND expires_at <= now ORDER BY expires_at LIMIT 100`) matches the index's filter and order, so the oldest due tickets come straight off it. An expired ticket no longer matches the filter, so the index never grows with history (its old entry is cleaned up by vacuum).
 
 - 🚇 `ux_journeys_ticket_id` makes "a single-journey ticket rides once" a database fact, and is also the index the exit uses to find the open journey. `ux_ledger_entries_surcharge_ref` allows at most one `Surcharge` row per ticket.
 - 🧾 `gate_taps.tap_id` is the primary key, so a resent tap collides there (`INSERT … ON CONFLICT DO NOTHING`) and gets the stored decision back.
@@ -381,7 +381,7 @@ erDiagram
 | `GATE_<STATION>_KEY_SHA256` → `Gate__Devices__N__KeySha256` | Compose → Core | The SHA-256 (hex) of that key. With `Gate__Devices__N__Id` and `Gate__Devices__N__Station` it enrolls one gate. A malformed or duplicate entry stops Core at startup |
 | `Gate__ExitGracePeriod` | Core | How long after its ticket's service day a QR still opens an exit gate (default `03:00:00`) |
 | `Jobs__ExpiryEnabled` | Core | Run the ticket expiry job (default `true`; tests turn it off and run it themselves) |
-| `Jobs__ExpiryInterval`, `Jobs__ExpiryBatchSize` | Core | Time between runs (default `00:01:00`) and tickets per transaction (default `100`, 1–1000). A bad value stops Core at startup |
+| `Jobs__ExpiryInterval`, `Jobs__ExpiryBatchSize` | Core | Time between runs (default `00:01:00`, 100 ms to 1 day) and tickets per transaction (default `100`, 1–1000). A bad value stops Core at startup |
 | `Services__NetworkUrl` | Core | Base URL of the Network service for fare quotes (default `http://localhost:5102/`; `http://network:8080/` in Compose) |
 | `RateLimiting__TokenLimit`, `RateLimiting__TokensPerPeriod` | gateway | Rate-limit bucket size and refill per second |
 
@@ -489,7 +489,7 @@ dotnet test        # needs Docker running: database tests start their own Postgr
 | Expiry job: an `Active` ticket past its day → `Expired` + one `Refund` row for its fare (pointing at the ticket); a second run finds nothing; a ticket ending exactly now expires, one a microsecond later doesn't; `Cancelled`, `Used`, `InJourney`, `Expired` tickets are never touched | `tests/TransitPass.Core.Tests/TicketExpiryTests.cs` |
 | Expiry job, one bad row: a ticket that already has a `Refund` row (the unique index refuses a second) or whose owner has no wallet stays `Active`, the rest of the batch and the next batches still expire, and it's retried next run | `TicketExpiryTests.cs` |
 | ⭐ Expiry job: 4 instances at once over 200 due tickets on 20 wallets (batches of 15) → 200 expired, exactly one refund per ticket, no deadlock, every wallet back to its balance and `SUM(ledger) == balance` | `TicketExpiryTests.cs` |
-| Expiry job: the hosted worker expires tickets on its own, comes back on its timer, stops cleanly on shutdown, does nothing when switched off; a bad interval or batch size stops Core at startup; the batch query can use `ix_tickets_active_expiry`; an expired ticket can't be cancelled or shown as a QR | `TicketExpiryTests.cs` |
+| Expiry job: the hosted worker expires tickets on its own, comes back on its timer, stops cleanly on shutdown, does nothing when switched off; a run that fails (database down) is logged and the next one still runs, a shutdown cancel ends it and a cancelled run changes nothing; a bad interval (outside 100 ms – 1 day, which `PeriodicTimer` would refuse later) or batch size stops Core at startup; the batch query can use `ix_tickets_active_expiry`; an expired ticket can't be cancelled or shown as a QR | `TicketExpiryTests.cs` |
 | The gateway passes the `Authorization` header through unchanged, and a gate's `X-Gate-Key` and POST body to Core | `tests/TransitPass.Gateway.Tests/GatewayRoutingTests.cs` |
 | Dijkstra finds the shortest path (a 2-hop route beats a longer direct track), both directions, unreachable and unknown stations | `tests/TransitPass.Network.Tests/RouteGraphTests.cs` |
 | Fare slabs at every boundary (exactly 2 km stays ৳20, 2,001 m is ৳30) | `RouteGraphTests.cs` |
