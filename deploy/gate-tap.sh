@@ -6,7 +6,7 @@ set -eu
 cd "$(dirname "$0")/.."
 
 station=${1:?station id}; direction=${2:?entry or exit}; credential=${3:?QR credential}
-tap=${4:-$(uuidgen | tr 'A-Z' 'a-z')}
+tap=${4:-$(uuidgen | tr '[:upper:]' '[:lower:]')}
 url=${GATEWAY_URL:-http://localhost:5100}/api/v1/gate/taps
 
 name=$(printf '%s' "$station" | tr 'a-z-' 'A-Z_')

@@ -69,3 +69,21 @@ jobs:
         run: |
           ./deploy/dev-secrets.sh
           docker compose build
+
+  scripts:
+    name: Shell scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      # The deploy scripts (demo.sh, fake-payment.sh, gate-tap.sh, dev-secrets.sh) are part of the product:
+      # a syntax error or an unquoted variable there breaks the 2-minute demo. Parse each one, then lint it
+      # (shellcheck ships with the GitHub Ubuntu runner).
+      - name: Syntax check
+        run: |
+          bash -n deploy/demo.sh
+          for f in deploy/dev-secrets.sh deploy/fake-payment.sh deploy/gate-tap.sh deploy/postgres/init.sh; do sh -n "$f"; done
+
+      - name: shellcheck
+        run: shellcheck deploy/*.sh deploy/postgres/*.sh
